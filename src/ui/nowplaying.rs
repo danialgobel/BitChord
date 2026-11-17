@@ -6,9 +6,10 @@ use egui::{Color32, Rect, Sense, Ui, Vec2, pos2, vec2};
 
 use super::widgets::{self, icon_button, named, text_at};
 use super::{Action, App, NpTab, Repeat, karaoke};
-use crate::lyrics::{Lyrics, Provider, Sync, SyncKind};
+use crate::lyrics::{Lyrics, Sync, SyncKind};
 use crate::shader::Params;
 use crate::theme::{self, icon};
+use crate::ui::lyric_prefs::LyricAnimMode;
 
 pub fn overlay(app: &mut App, ctx: &egui::Context, now: f64) {
     use crate::preset::BgMode;
@@ -33,6 +34,17 @@ pub fn overlay(app: &mut App, ctx: &egui::Context, now: f64) {
             if !app.fullscreen {
                 super::titlebar::drag_area(ui, Rect::from_min_size(rect.min, vec2(rect.width(), super::titlebar::HEIGHT)), "now-playing");
             }
+
+            // FULLSCREEN CODE EDITOR & CHAT LYRICS: fills 100% of the window without any album art, banners, or headers
+            let is_fullscreen_lyric = matches!(app.lyric_prefs.anim_mode, LyricAnimMode::CodeEditor | LyricAnimMode::Chat);
+            if is_fullscreen_lyric {
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    app.lyric_prefs.anim_mode = app.lyric_prefs.prev_anim_mode;
+                }
+                lyrics_panel(app, ui, rect, now, false);
+                return;
+            }
+
             let painter = ui.painter_at(rect);
             let art = matches!(b.mode, BgMode::Kawarp | BgMode::CoverStatic);
             if b.mode == BgMode::CoverFullbleed {
@@ -525,9 +537,82 @@ fn cover_column(app: &mut App, ui: &mut Ui, col: Rect, track: &crate::model::Tra
 
 // ------------------------------------------------------------------ lyrics
 
+fn paint_chat_empty_view(app: &mut App, ui: &mut Ui, rect: Rect, msg: &str) {
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 0.0, Color32::from_rgb(7, 9, 13));
+
+    // Top-Left Back button (44x44px accessible touch target)
+    let back_btn_rect = Rect::from_min_size(rect.left_top() + vec2(24.0, 22.0), vec2(44.0, 44.0));
+    let pointer_hover = ui.input(|i| i.pointer.hover_pos());
+    let clicked = ui.input(|i| i.pointer.primary_clicked());
+    let is_back_hover = pointer_hover.is_some_and(|p| back_btn_rect.contains(p));
+    let back_bg = if is_back_hover { Color32::from_white_alpha(35) } else { Color32::from_white_alpha(15) };
+    painter.rect_filled(back_btn_rect, 22.0, back_bg);
+    painter.rect_stroke(back_btn_rect, 22.0, egui::Stroke::new(1.0, Color32::from_white_alpha(25)), egui::StrokeKind::Inside);
+    let back_col = if is_back_hover { Color32::WHITE } else { Color32::from_white_alpha(180) };
+    painter.text(back_btn_rect.center(), egui::Align2::CENTER_CENTER, "←", egui::FontId::proportional(20.0), back_col);
+    if is_back_hover {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if clicked {
+            app.lyric_prefs.anim_mode = app.lyric_prefs.prev_anim_mode;
+            return;
+        }
+    }
+
+    // Title card centered
+    let card_w = 420.0_f32.min(rect.width() - 80.0);
+    let card_h = 130.0_f32;
+    let card_rect = Rect::from_center_size(rect.center(), vec2(card_w, card_h));
+    painter.rect_filled(card_rect, 20.0, Color32::from_black_alpha(190));
+    painter.rect_stroke(card_rect, 20.0, egui::Stroke::new(1.0, Color32::from_white_alpha(25)), egui::StrokeKind::Inside);
+
+    let title = app.current().map(|t| t.title.as_str()).unwrap_or("Unknown Title");
+    let artist = app.current().map(|t| t.artist_line()).unwrap_or_else(|| "Unknown Artist".to_string());
+
+    painter.text(pos2(card_rect.center().x, card_rect.top() + 30.0), egui::Align2::CENTER_CENTER, title, egui::FontId::proportional(18.0), Color32::WHITE);
+    painter.text(pos2(card_rect.center().x, card_rect.top() + 56.0), egui::Align2::CENTER_CENTER, &artist, egui::FontId::proportional(14.0), Color32::from_white_alpha(170));
+    painter.text(pos2(card_rect.center().x, card_rect.top() + 92.0), egui::Align2::CENTER_CENTER, msg, egui::FontId::proportional(13.0), Color32::from_white_alpha(120));
+
+    // Bottom Playback Controls (190x44px)
+    let ctrl_rect = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 44.0), vec2(190.0, 44.0));
+    painter.rect_filled(ctrl_rect, 22.0, Color32::from_black_alpha(210));
+    painter.rect_stroke(ctrl_rect, 22.0, egui::Stroke::new(1.0, Color32::from_white_alpha(32)), egui::StrokeKind::Inside);
+
+    let prev_rect = Rect::from_center_size(pos2(ctrl_rect.center().x - 52.0, ctrl_rect.center().y), Vec2::splat(32.0));
+    let play_rect = Rect::from_center_size(ctrl_rect.center(), Vec2::splat(34.0));
+    let next_rect = Rect::from_center_size(pos2(ctrl_rect.center().x + 52.0, ctrl_rect.center().y), Vec2::splat(32.0));
+
+    if pointer_hover.is_some_and(|p| prev_rect.contains(p)) {
+        painter.circle_filled(prev_rect.center(), 16.0, Color32::from_white_alpha(28));
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if clicked { app.prev(); }
+    }
+    painter.text(prev_rect.center(), egui::Align2::CENTER_CENTER, "⏮", egui::FontId::proportional(16.0), Color32::WHITE);
+
+    if pointer_hover.is_some_and(|p| play_rect.contains(p)) {
+        painter.circle_filled(play_rect.center(), 17.0, Color32::from_white_alpha(38));
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if clicked { app.toggle(); }
+    }
+    let play_sym = if app.playing() { "❚❚" } else { "▶" };
+    painter.text(play_rect.center(), egui::Align2::CENTER_CENTER, play_sym, egui::FontId::proportional(16.0), Color32::WHITE);
+
+    if pointer_hover.is_some_and(|p| next_rect.contains(p)) {
+        painter.circle_filled(next_rect.center(), 16.0, Color32::from_white_alpha(28));
+        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        if clicked { app.next(); }
+    }
+    painter.text(next_rect.center(), egui::Align2::CENTER_CENTER, "⏭", egui::FontId::proportional(16.0), Color32::WHITE);
+}
+
 fn lyrics_panel(app: &mut App, ui: &mut Ui, rect: Rect, now: f64, centered: bool) {
+    let is_chat = app.lyric_prefs.anim_mode == LyricAnimMode::Chat;
     // Lent out for the frame rather than cloned (the drawing needs `app` mutably).
     let Some((id, set)) = app.lyrics.take() else {
+        if is_chat {
+            paint_chat_empty_view(app, ui, rect, "Memuat lirik…");
+            return;
+        }
         ui.add_space(rect.height() * 0.35);
         ui.vertical_centered(|ui| {
             ui.spinner();
@@ -537,12 +622,17 @@ fn lyrics_panel(app: &mut App, ui: &mut Ui, rect: Rect, now: f64, centered: bool
     };
     if let Some(lyrics) = app.lyric_prefs.choose(&id, &set).and_then(|p| set.get(p)) {
         let panel = Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - 4.0));
-        if lyrics.sync == Sync::None {
+        if lyrics.sync == Sync::None && !is_chat {
             plain_lyrics(app, ui, panel, lyrics);
         } else {
             synced(app, ui, panel, &id, lyrics, now, centered);
         }
     } else {
+        if is_chat {
+            app.lyrics = Some((id, set));
+            paint_chat_empty_view(app, ui, rect, "Lirik tidak tersedia");
+            return;
+        }
         ui.add_space(rect.height() * 0.4);
         ui.vertical_centered(|ui| {
             ui.label(egui::RichText::new("No lyrics found for this song").font(theme::semibold(20.0)).color(theme::text_dim()));
@@ -623,13 +713,38 @@ fn synced(app: &mut App, ui: &mut Ui, rect: Rect, id: &str, lyrics: &Lyrics, now
         h.finish()
     };
     let scale = app.lyric_prefs.text_scale;
-    let frame = karaoke::Frame { lyrics, key, roman, trans, t, playing, now, rect, style, accent, centered, scale };
+    let anim_mode = app.lyric_prefs.anim_mode;
+    let title_owned = app.current().map(|t| t.title.clone());
+    let artist_owned = app.current().map(|t| t.artist_line());
+    let thumbs_owned = app.current().map(|t| t.thumbs.clone()).unwrap_or_default();
+    let title = title_owned.as_deref();
+    let artist = artist_owned.as_deref();
+    let thumbs = thumbs_owned.as_slice();
+    let frame = karaoke::Frame { lyrics, key, roman, trans, t, playing, now, rect, style, accent, centered, scale, anim_mode, title, artist, thumbs };
     // The view lives in `app`; the frame borrows `app` for decorations, so swap it out.
     let mut view = std::mem::take(&mut app.lyric_view);
-    let out = if karaoke::dev_off("view") { karaoke::Out { seek: None, animating: true, user_scrolling: false } } else { view.show(ui, frame) };
+    let out = if karaoke::dev_off("view") {
+        karaoke::Out { seek: None, animating: true, user_scrolling: false, ..Default::default() }
+    } else {
+        view.show(ui, frame)
+    };
     app.lyric_view = view;
+    if out.return_to_prev_mode {
+        app.lyric_prefs.anim_mode = app.lyric_prefs.prev_anim_mode;
+    }
+    if out.toggle_play {
+        app.toggle();
+    }
+    if out.next_track {
+        app.next();
+    }
+    if out.prev_track {
+        app.prev();
+    }
     if let Some(s) = out.seek {
-        app.actions.push(Action::Seek(s as f32));
+        if !out.return_to_prev_mode {
+            app.actions.push(Action::Seek(s as f32));
+        }
     }
     if out.animating {
         ui.ctx().request_repaint();
@@ -730,42 +845,53 @@ fn options_menu(app: &mut App, ui: &mut Ui, rect: Rect, track: &crate::model::Tr
     egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
         ui.set_width(270.0);
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-        ui.add_space(4.0);
-        // Lyrics first: the source, translation and timing are what the menu is for
-        // while the lyrics are up.
-        let liked = app.liked.contains(&track.id);
-        if lyrics {
-            lyric_options(app, ui);
-            menu_divider(ui);
-        }
-        widgets::song_actions(ui, track, liked, None, &mut app.actions);
-        menu_divider(ui);
-        if widgets::menu_action(ui, Some(icon::LIST_PLUS), "Play next") {
-            app.actions.push(Action::PlayNext(track.clone()));
-        }
-        if widgets::menu_action(ui, Some(icon::LIST_MUSIC), "Add to queue") {
-            app.actions.push(Action::Enqueue(track.clone()));
-        }
-        let queue = app.np_tab == NpTab::UpNext;
-        if widgets::menu_action(ui, Some(icon::LIST_MUSIC), if queue { "View lyrics" } else { "View queue" }) {
-            app.np_tab = if queue { NpTab::Lyrics } else { NpTab::UpNext };
-        }
-        if widgets::menu_action(ui, Some(icon::RADIO), "Start radio") {
-            app.actions.push(Action::Radio(track.clone()));
-        }
-        // Quality toggle at the bottom: revert when hi-res is playing, upgrade when not.
-        let hires_playing = app.audio_info.as_ref().is_some_and(|(_, i)| i.lossless() || i.atmos);
-        if hires_playing || !app.hires_sources.is_empty() {
-            menu_divider(ui);
-            if hires_playing {
-                if widgets::menu_action(ui, Some(icon::MUSIC), "Revert quality") {
-                    app.actions.push(Action::RevertQuality);
+        let max_h = ui.input(|i| {
+            i.viewport().inner_rect.or(i.viewport().outer_rect).map_or(650.0, |r| (r.height() - 60.0).max(240.0))
+        });
+        egui::ScrollArea::vertical()
+            .id_salt("np-menu-scroll")
+            .max_height(max_h)
+            .auto_shrink([false, true])
+            .show(ui, |ui| {
+                ui.set_width(270.0);
+                ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                ui.add_space(4.0);
+                // Lyrics first: the source, translation and timing are what the menu is for
+                // while the lyrics are up.
+                let liked = app.liked.contains(&track.id);
+                if lyrics {
+                    lyric_options(app, ui);
+                    menu_divider(ui);
                 }
-            } else if widgets::menu_action(ui, Some(icon::MUSIC), "Upgrade quality") {
-                app.actions.push(Action::UpgradeQuality);
-            }
-        }
-        ui.add_space(4.0);
+                widgets::song_actions(ui, track, liked, None, &mut app.actions);
+                menu_divider(ui);
+                if widgets::menu_action(ui, Some(icon::LIST_PLUS), "Play next") {
+                    app.actions.push(Action::PlayNext(track.clone()));
+                }
+                if widgets::menu_action(ui, Some(icon::LIST_MUSIC), "Add to queue") {
+                    app.actions.push(Action::Enqueue(track.clone()));
+                }
+                let queue = app.np_tab == NpTab::UpNext;
+                if widgets::menu_action(ui, Some(icon::LIST_MUSIC), if queue { "View lyrics" } else { "View queue" }) {
+                    app.np_tab = if queue { NpTab::Lyrics } else { NpTab::UpNext };
+                }
+                if widgets::menu_action(ui, Some(icon::RADIO), "Start radio") {
+                    app.actions.push(Action::Radio(track.clone()));
+                }
+                // Quality toggle at the bottom: revert when hi-res is playing, upgrade when not.
+                let hires_playing = app.audio_info.as_ref().is_some_and(|(_, i)| i.lossless() || i.atmos);
+                if hires_playing || !app.hires_sources.is_empty() {
+                    menu_divider(ui);
+                    if hires_playing {
+                        if widgets::menu_action(ui, Some(icon::MUSIC), "Revert quality") {
+                            app.actions.push(Action::RevertQuality);
+                        }
+                    } else if widgets::menu_action(ui, Some(icon::MUSIC), "Upgrade quality") {
+                        app.actions.push(Action::UpgradeQuality);
+                    }
+                }
+                ui.add_space(4.0);
+            });
     });
 }
 
@@ -781,6 +907,43 @@ fn lyric_options(app: &mut App, ui: &mut Ui) {
         if source_row(ui, p.name(), p.sync(), *p == shown) {
             pick = Some(*p);
         }
+    }
+    menu_divider(ui);
+    menu_caption(ui, "LYRICS ANIMATION");
+    let mode = app.lyric_prefs.anim_mode;
+    if anim_mode_row(ui, "Standard Karaoke", "Smooth swipe & wave", Color32::from_rgb(168, 130, 255), mode == LyricAnimMode::Standard) {
+        app.lyric_prefs.anim_mode = LyricAnimMode::Standard;
+        app.lyric_view.reset();
+    }
+    if anim_mode_row(ui, "Kinetic Pop", "Word pop-in & punchy reveal", Color32::from_rgb(90, 200, 250), mode == LyricAnimMode::KineticPop) {
+        app.lyric_prefs.anim_mode = LyricAnimMode::KineticPop;
+        app.lyric_view.reset();
+    }
+    if anim_mode_row(ui, "Constellation", "Star-node graph & traveling orb", Color32::from_rgb(255, 105, 180), mode == LyricAnimMode::Constellation) {
+        app.lyric_prefs.anim_mode = LyricAnimMode::Constellation;
+        app.lyric_view.reset();
+    }
+    if anim_mode_row(ui, "Convex Lens", "3-word vertical focus roll", Color32::from_rgb(255, 180, 50), mode == LyricAnimMode::ConvexLens) {
+        app.lyric_prefs.anim_mode = LyricAnimMode::ConvexLens;
+        app.lyric_view.reset();
+    }
+    if anim_mode_row(ui, "Gravity", "Physics throw & free-fall", Color32::from_rgb(80, 200, 120), mode == LyricAnimMode::PhysicsThrow) {
+        app.lyric_prefs.anim_mode = LyricAnimMode::PhysicsThrow;
+        app.lyric_view.reset();
+    }
+    if anim_mode_row(ui, "Code Editor", "IDE typing & cinematic camera", Color32::from_rgb(255, 75, 110), mode == LyricAnimMode::CodeEditor) {
+        if app.lyric_prefs.anim_mode != LyricAnimMode::CodeEditor {
+            app.lyric_prefs.prev_anim_mode = app.lyric_prefs.anim_mode;
+        }
+        app.lyric_prefs.anim_mode = LyricAnimMode::CodeEditor;
+        app.lyric_view.reset();
+    }
+    if anim_mode_row(ui, "Chat Lyrics", "iMessage chat bubbles & typing", Color32::from_rgb(11, 132, 254), mode == LyricAnimMode::Chat) {
+        if app.lyric_prefs.anim_mode != LyricAnimMode::Chat {
+            app.lyric_prefs.prev_anim_mode = app.lyric_prefs.anim_mode;
+        }
+        app.lyric_prefs.anim_mode = LyricAnimMode::Chat;
+        app.lyric_view.reset();
     }
     menu_divider(ui);
     let tip = format!("Translation · {}", lang_name(&app.lyric_prefs.target));
@@ -911,7 +1074,7 @@ pub(super) fn audio_badge(app: &App, ui: &mut Ui, at: egui::Pos2, small: bool) -
         x += icon_w + 5.0;
     }
     ui.painter().galley(pos2(x, at.y + (h - g.size().y) / 2.0), g, ink);
-    egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| audio_info_menu(ui, info));
+    egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| audio_info_menu(app, ui, info));
     w
 }
 
@@ -932,15 +1095,15 @@ pub(super) fn audio_badge_icon(app: &App, ui: &mut Ui, center: egui::Pos2, small
     let accent = app.accent_color();
     let mark = theme::with_alpha(accent, 0.85 + 0.15 * hover);
     paint_quality_icon(ui, center, gh, info.atmos, mark);
-    egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| audio_info_menu(ui, info));
+    egui::Popup::menu(&resp).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| audio_info_menu(app, ui, info));
 }
 
 /// What the stream is: its source, format and the numbers under those.
-fn audio_info_menu(ui: &mut Ui, info: &crate::hires::Info) {
-    ui.set_width(300.0);
+fn audio_info_menu(app: &App, ui: &mut Ui, info: &crate::hires::Info) {
+    ui.set_width(320.0);
     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
     ui.add_space(4.0);
-    menu_caption(ui, "AUDIO QUALITY");
+    menu_caption(ui, "SOURCE QUALITY");
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 34.0), Sense::hover());
     let g = widgets::galley(ui, info.badge(), theme::semibold(17.0), theme::text(), 200.0);
     let mut x = r.left() + 12.0;
@@ -964,6 +1127,8 @@ fn audio_info_menu(ui: &mut Ui, info: &crate::hires::Info) {
     }
     if let Some(bits) = info.bit_depth {
         info_row(ui, "Bit depth", &format!("{bits}-bit"));
+    } else {
+        info_row(ui, "Type", if info.lossless() { "Lossless" } else { "Lossy" });
     }
     if let Some(n) = info.channels {
         let text = match n {
@@ -979,6 +1144,27 @@ fn audio_info_menu(ui: &mut Ui, info: &crate::hires::Info) {
     if info.duration_ms > 0 {
         info_row(ui, "Duration", &super::fmt_time((info.duration_ms / 1000) as u32));
     }
+    menu_divider(ui);
+    menu_caption(ui, "AUDIO OUTPUT (DEVICE)");
+    let dev_name = match &app.output_device {
+        Some((_, name)) => name.as_str(),
+        None => "System Default",
+    };
+    info_row(ui, "Device", dev_name);
+    let out_hz = app.audio.status.output_rate();
+    if out_hz > 0 {
+        info_row(ui, "Output rate", &rate_text(out_hz));
+    }
+    let is_perfect = app.audio.status.is_bit_perfect();
+    let is_exclusive = app.audio.status.is_exclusive();
+    let mode_str = if is_perfect {
+        "Bit-Perfect (Direct)"
+    } else if is_exclusive {
+        "WASAPI Exclusive"
+    } else {
+        "WASAPI Shared"
+    };
+    info_row(ui, "Signal path", mode_str);
     ui.add_space(6.0);
 }
 
@@ -1028,6 +1214,24 @@ fn source_row(ui: &mut Ui, name: &str, sync: SyncKind, current: bool) -> bool {
     let x = rect.left() + 40.0;
     text_at(ui, pos2(x, rect.top() + 6.0), name, theme::semibold(13.5), theme::text(), rect.right() - x - 34.0);
     text_at(ui, pos2(x, rect.top() + 24.0), sync_label(sync), theme::regular(12.0), theme::text_dim(), rect.right() - x - 34.0);
+    if current {
+        widgets::icon_at(ui, pos2(rect.right() - 18.0, rect.center().y), icon::CHECK, 16.0, theme::text());
+    }
+    resp.clicked()
+}
+
+/// A lyrics animation mode option: dot, title, and description, with a check on the active mode.
+fn anim_mode_row(ui: &mut Ui, name: &str, desc: &str, dot_color: Color32, current: bool) -> bool {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::click());
+    let resp = named(resp, &format!("Lyrics animation {name}")).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.12);
+    if h > 0.0 || current {
+        ui.painter().rect_filled(rect, 8.0, theme::glass(0.05 * current as u8 as f32 + 0.08 * h));
+    }
+    ui.painter().circle_filled(pos2(rect.left() + 19.0, rect.center().y), 3.5, dot_color);
+    let x = rect.left() + 40.0;
+    text_at(ui, pos2(x, rect.top() + 6.0), name, theme::semibold(13.5), theme::text(), rect.right() - x - 34.0);
+    text_at(ui, pos2(x, rect.top() + 24.0), desc, theme::regular(12.0), theme::text_dim(), rect.right() - x - 34.0);
     if current {
         widgets::icon_at(ui, pos2(rect.right() - 18.0, rect.center().y), icon::CHECK, 16.0, theme::text());
     }

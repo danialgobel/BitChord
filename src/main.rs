@@ -81,6 +81,7 @@ fn main() -> eframe::Result {
     } else if deeplink::forward_show() {
         return Ok(());
     }
+    ensure_addon_server();
     init_logging();
     update::clean_portable();
     stream::init_dev_hooks();
@@ -270,3 +271,49 @@ fn data_dir() -> std::path::PathBuf {
     }
     directories::ProjectDirs::from("", "", "ytm-rs").expect("no home directory").data_dir().to_path_buf()
 }
+
+#[cfg(windows)]
+fn ensure_addon_server() {
+    use std::net::TcpStream;
+    use std::time::Duration;
+    if TcpStream::connect_timeout(&"127.0.0.1:8765".parse().unwrap(), Duration::from_millis(150)).is_err() {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        let my_pid = std::process::id().to_string();
+        let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(|p| p.to_path_buf())).unwrap_or_default();
+
+        let candidates = [
+            exe_dir.join("bin").join("bitchord_addon_server").join("bitchord_addon_server.exe"),
+            exe_dir.join("bin").join("bitchord_addon_server.exe"),
+            exe_dir.join("bitchord_addon_server.exe"),
+            exe_dir.join("addon_server").join("bitchord_addon_server.exe"),
+        ];
+        for candidate in candidates {
+            if candidate.exists() {
+                let _ = std::process::Command::new(candidate)
+                    .arg("--parent-pid")
+                    .arg(&my_pid)
+                    .creation_flags(CREATE_NO_WINDOW)
+                    .spawn();
+                return;
+            }
+        }
+
+        let dev_script = exe_dir.join("addon_server").join("bitchord_addon_server.py");
+        if dev_script.exists() {
+            let python = std::env::var_os("PYTHON")
+                .map(std::path::PathBuf::from)
+                .unwrap_or_else(|| std::path::PathBuf::from("pythonw"));
+            let _ = std::process::Command::new(python)
+                .arg(dev_script)
+                .arg("--parent-pid")
+                .arg(&my_pid)
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn();
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn ensure_addon_server() {}
+

@@ -445,7 +445,7 @@ const PLAY_SONG_WAIT: std::time::Duration = std::time::Duration::from_millis(250
 const PREFETCH_SONG_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 /// How long playback waits for the hi-res sources before falling back to YouTube. A cold
 /// addon mints a lossless URL in a few seconds, and every source is asked at once.
-const HIRES_WAIT: std::time::Duration = std::time::Duration::from_secs(12);
+const HIRES_WAIT: std::time::Duration = std::time::Duration::from_millis(3500);
 
 #[derive(Clone)]
 pub struct Backend {
@@ -1113,6 +1113,8 @@ impl Backend {
         let audio = self.audio.clone();
         let tx = self.tx.clone();
         let wake = self.wake.clone();
+        let this_backend = self.clone();
+        let current_vid = video_id.to_string();
         // Opening the decoder reads the container header, which blocks on the download.
         // Starting mid-song needs the seekable decoder (it waits for every fragment
         // header); from the top, the non-seekable one starts sooner.
@@ -1130,12 +1132,55 @@ impl Backend {
             Ok(decoder) => {
                 log::debug!("play gen {generation}: decoder ready at {at:?} in {:?}", t0.elapsed());
                 // What a hi-res stream is, as the decoder actually reads it.
-                if let Some(mut info) = shared2.info.clone() {
+                let info = if let Some(mut info) = shared2.info.clone() {
                     info.sample_rate = Some(rodio::Source::sample_rate(&decoder).get());
                     info.channels = Some(rodio::Source::channels(&decoder).get() as u8);
-                    let _ = tx.send(Resp::AudioInfo { generation, info });
-                    wake();
-                }
+                    info
+                } else {
+                    let sample_rate = rodio::Source::sample_rate(&decoder).get();
+                    let channels = rodio::Source::channels(&decoder).get() as u8;
+                    let (codec, bitrate, quality, source_name) = match shared2.format {
+                        stream::Format::Aac => (
+                            "AAC".to_string(),
+                            Some(256),
+                            "High Quality (AAC 256k)".to_string(),
+                            "YouTube Music (Premium)".to_string(),
+                        ),
+                        stream::Format::Opus => (
+                            "Opus".to_string(),
+                            Some(160),
+                            "High Quality (Opus 160k)".to_string(),
+                            "YouTube Music".to_string(),
+                        ),
+                        stream::Format::File { hint, .. } => (
+                            hint.to_ascii_uppercase(),
+                            None,
+                            "Audio File".to_string(),
+                            "Local Audio".to_string(),
+                        ),
+                        stream::Format::Pcm { .. } => (
+                            "PCM".to_string(),
+                            None,
+                            "PCM Lossless".to_string(),
+                            "Direct Stream".to_string(),
+                        ),
+                    };
+                    crate::hires::Info {
+                        source: source_name,
+                        host: "music.youtube.com".to_string(),
+                        codec,
+                        quality,
+                        bitrate_kbps: bitrate,
+                        sample_rate: Some(sample_rate),
+                        bit_depth: None,
+                        channels: Some(channels),
+                        atmos: false,
+                        size: shared2.total,
+                        duration_ms: shared2.duration_ms,
+                    }
+                };
+                let _ = tx.send(Resp::AudioInfo { generation, info });
+                wake();
                 audio.send(AudioCmd::Start { generation, decoder, shared: shared2, at });
                 // Skipped past before it started: that one doesn't count.
                 if let Some((this, id)) = report.filter(|_| audio.status.wanted_gen.load(Ordering::Relaxed) == generation) {
@@ -1151,16 +1196,33 @@ impl Backend {
                     });
                 }
             }
-            Err(e) => match fallback {
-                Some((this, listed, report)) => {
-                    log::warn!("{listed}'s song won't start ({e}); playing the music video");
-                    let _ = tx.send(Resp::PlayingAs { generation, listed: listed.clone(), song: None });
-                    this.request(Req::Play { video_id: listed, generation, at, report, song_of: None, song: None, track: None });
+            Err(e) => {
+                if shared2.info.is_some() {
+                    log::warn!("{current_vid}: hi-res stream decode failed ({e}); auto-falling back to native stream");
+                    this_backend.reverted.lock().unwrap().insert(current_vid.clone());
+                    this_backend.request(Req::Play {
+                        video_id: current_vid,
+                        generation,
+                        at,
+                        report: report.is_some(),
+                        song_of: None,
+                        song: None,
+                        track: None,
+                    });
                     wake();
+                    return;
                 }
-                None => {
-                    let _ = tx.send(Resp::PlayError { generation, msg: format!("decode: {e}") });
-                    wake();
+                match fallback {
+                    Some((this, listed, report)) => {
+                        log::warn!("{listed}'s song won't start ({e}); playing the music video");
+                        let _ = tx.send(Resp::PlayingAs { generation, listed: listed.clone(), song: None });
+                        this.request(Req::Play { video_id: listed, generation, at, report, song_of: None, song: None, track: None });
+                        wake();
+                    }
+                    None => {
+                        let _ = tx.send(Resp::PlayError { generation, msg: format!("decode: {e}") });
+                        wake();
+                    }
                 }
             },
         });

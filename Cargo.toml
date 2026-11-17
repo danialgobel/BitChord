@@ -1,9 +1,9 @@
 [package]
 name = "bitchord"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2024"
 license = "GPL-3.0-only"
-repository = "https://github.com/jackychan4891/BitChord-PC-Continued"
+repository = "https://github.com/danialgobel/BitChord"
 description = "Native BitChord client"
 
 [dependencies]
@@ -72,8 +72,8 @@ libc = "0.2"
 
 [profile.release]
 opt-level = 3
-lto = "fat"
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 strip = true
 # Unwind, not abort: a panic while handling one request (in a library or a parser)
 # must fail that request, not close the app.

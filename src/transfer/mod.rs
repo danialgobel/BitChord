@@ -379,9 +379,18 @@ impl Transfer {
         let this = self.clone();
         rt.spawn(async move {
             let res = async {
-                let Source::Playlist(id) = Source::parse(&link)? else { unreachable!() };
-                let client = spotify::Client::connect(this.cookie().as_deref(), &this.data_dir).await?;
-                client.playlist_info(&id).await
+                match Source::parse(&link)? {
+                    Source::Playlist(id) => {
+                        let client = spotify::Client::connect(this.cookie().as_deref(), &this.data_dir).await?;
+                        client.playlist_info(&id).await
+                    }
+                    Source::Liked => {
+                        Ok(spotify::Entry { source: Source::Liked, name: "Liked Songs".into(), owner: String::new(), count: None, art: None })
+                    }
+                    Source::Universal(url) => {
+                        this.lookup_universal(&url).await
+                    }
+                }
             }
             .await
             .map_err(|e| e.to_string());
@@ -392,6 +401,81 @@ impl Transfer {
             drop(slot);
             this.wake();
         });
+    }
+
+    async fn lookup_universal(&self, url: &str) -> anyhow::Result<spotify::Entry> {
+        let client = reqwest::Client::new();
+        let enc: String = url::form_urlencoded::byte_serialize(url.as_bytes()).collect();
+        let api_url = format!("http://127.0.0.1:8765/playlist-info?url={enc}");
+        let resp = client.get(&api_url).send().await
+            .map_err(|e| anyhow::anyhow!("Background service unreachable: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let res: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|_| anyhow::anyhow!("Playlist not found or unsupported link"))?;
+        if !status.is_success() {
+            if let Some(err_msg) = res.get("error").and_then(|v| v.as_str()) {
+                anyhow::bail!("{err_msg}");
+            }
+            anyhow::bail!("Playlist not found or unsupported link");
+        }
+        let name = res.get("name").and_then(|v| v.as_str()).unwrap_or("Imported Playlist").to_owned();
+        let owner = res.get("owner").and_then(|v| v.as_str()).unwrap_or("").to_owned();
+        let count = res.get("count").and_then(|v| v.as_u64()).map(|c| c as usize);
+        let art = res.get("art").and_then(|v| v.as_str()).map(str::to_owned);
+        Ok(spotify::Entry {
+            source: Source::Universal(url.to_owned()),
+            name,
+            owner,
+            count,
+            art,
+        })
+    }
+
+    async fn fetch_universal_playlist(&self, url: &str, on_progress: impl Fn(usize, usize)) -> anyhow::Result<spotify::Playlist> {
+        let client = reqwest::Client::new();
+        let enc: String = url::form_urlencoded::byte_serialize(url.as_bytes()).collect();
+        let api_url = format!("http://127.0.0.1:8765/playlist-tracks?url={enc}");
+        let resp = client.get(&api_url).send().await
+            .map_err(|e| anyhow::anyhow!("Background service unreachable: {e}"))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let res: serde_json::Value = serde_json::from_str(&text)
+            .map_err(|_| anyhow::anyhow!("Playlist tracks not found or unsupported link"))?;
+        if !status.is_success() {
+            if let Some(err_msg) = res.get("error").and_then(|v| v.as_str()) {
+                anyhow::bail!("{err_msg}");
+            }
+            anyhow::bail!("Playlist tracks not found or unsupported link");
+        }
+        let name = res.get("name").and_then(|v| v.as_str()).unwrap_or("Imported Playlist").to_owned();
+        let tracks_val = res.get("tracks").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+        let total = tracks_val.len();
+        on_progress(0, total);
+        let mut tracks = Vec::new();
+        for t in tracks_val {
+            let t_name = t.get("name").and_then(|v| v.as_str()).unwrap_or("").trim().to_owned();
+            let artists: Vec<String> = t.get("artists").and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|a| a.as_str()).map(str::to_owned).collect())
+                .unwrap_or_default();
+            let duration = t.get("duration").and_then(|v| v.as_u64()).map(|d| d as u32);
+            let art = t.get("art").and_then(|v| v.as_str()).map(str::to_owned);
+            if !t_name.is_empty() {
+                tracks.push(spotify::Track {
+                    name: t_name,
+                    artists,
+                    local: false,
+                    art,
+                    duration,
+                });
+            }
+        }
+        on_progress(tracks.len(), total);
+        Ok(spotify::Playlist {
+            name,
+            tracks,
+            skipped: 0,
+        })
     }
 
     pub fn set_paused(&self, paused: bool) {
@@ -642,15 +726,21 @@ impl Transfer {
             None => {
                 let t = Instant::now();
                 let cookie = self.cookie();
-                anyhow::ensure!(cookie.is_some() || source != Source::Liked, "Sign in to Spotify to copy your Liked Songs");
-                let client = spotify::Client::connect(cookie.as_deref(), &self.data_dir).await?;
                 let progress = |done: usize, total: usize| {
                     self.with_job(|j| j.read = (done, total));
                     self.wake();
                 };
                 let playlist = match &source {
-                    Source::Playlist(id) => client.playlist(id, progress).await?,
-                    Source::Liked => client.liked(progress).await?,
+                    Source::Playlist(id) => {
+                        let client = spotify::Client::connect(cookie.as_deref(), &self.data_dir).await?;
+                        client.playlist(id, progress).await?
+                    }
+                    Source::Liked => {
+                        anyhow::ensure!(cookie.is_some(), "Sign in to Spotify to copy your Liked Songs");
+                        let client = spotify::Client::connect(cookie.as_deref(), &self.data_dir).await?;
+                        client.liked(progress).await?
+                    }
+                    Source::Universal(url) => self.fetch_universal_playlist(url, progress).await?,
                 };
                 let mut playlist = playlist;
                 // Dev hook: YTM_TRANSFER_LIMIT=<n> keeps the first n songs.
@@ -981,7 +1071,13 @@ impl Transfer {
 
 impl Source {
     fn parse_key(key: &str) -> Self {
-        if key == "liked" { Source::Liked } else { Source::Playlist(key.to_owned()) }
+        if key == "liked" {
+            Source::Liked
+        } else if key.starts_with("http") {
+            Source::Universal(key.to_owned())
+        } else {
+            Source::Playlist(key.to_owned())
+        }
     }
 }
 

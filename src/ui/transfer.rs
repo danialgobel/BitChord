@@ -21,7 +21,7 @@ const SPOTIFY: Color32 = Color32::from_rgb(30, 215, 96);
 pub struct Setup {
     /// The chosen library entry, by source.
     picked: Option<Source>,
-    link: String,
+    pub link: String,
     /// Playlist name; follows the picked source until edited.
     name: String,
     name_for: Option<Source>,
@@ -67,8 +67,34 @@ fn spotify_thumbs(art: &Option<String>) -> Vec<Thumb> {
     art.iter().map(|u| Thumb { url: u.clone(), width: 64, height: 64 }).collect()
 }
 
+const APPLE_RED: Color32 = Color32::from_rgb(250, 36, 60);
+const DEEZER: Color32 = Color32::from_rgb(162, 56, 255);
+const YTM_RED: Color32 = Color32::from_rgb(255, 0, 0);
+const SOUNDCLOUD: Color32 = Color32::from_rgb(255, 85, 0);
+
+/// Apple Music badge: pink/red with white musical note
+fn apple_badge(ui: &Ui, rect: Rect) {
+    ui.painter().rect_filled(rect, rect.width() * 0.27, APPLE_RED);
+    let s = rect.width() / 24.0;
+    let c = rect.center();
+    let white = Color32::WHITE;
+    let n1 = pos2(c.x - 3.8 * s, c.y + 4.2 * s);
+    ui.painter().circle_filled(n1, 2.6 * s, white);
+    let n2 = pos2(c.x + 3.8 * s, c.y + 2.0 * s);
+    ui.painter().circle_filled(n2, 2.6 * s, white);
+    ui.painter().rect_filled(Rect::from_min_max(pos2(n1.x + 1.2 * s, c.y - 5.0 * s), pos2(n1.x + 2.7 * s, n1.y)), 0.0, white);
+    ui.painter().rect_filled(Rect::from_min_max(pos2(n2.x + 1.2 * s, c.y - 7.2 * s), pos2(n2.x + 2.7 * s, n2.y)), 0.0, white);
+    let beam_pts = vec![
+        pos2(n1.x + 1.2 * s, c.y - 3.0 * s),
+        pos2(n2.x + 2.7 * s, c.y - 5.2 * s),
+        pos2(n2.x + 2.7 * s, c.y - 7.5 * s),
+        pos2(n1.x + 1.2 * s, c.y - 5.3 * s),
+    ];
+    ui.painter().add(egui::Shape::convex_polygon(beam_pts, white, egui::Stroke::NONE));
+}
+
 /// The Spotify logo: a green rounded square with its three arcs.
-fn badge(ui: &Ui, rect: Rect) {
+fn spotify_badge(ui: &Ui, rect: Rect) {
     ui.painter().rect_filled(rect, rect.width() * 0.27, SPOTIFY);
     let s = rect.width() / 24.0;
     let c = rect.center();
@@ -86,6 +112,78 @@ fn badge(ui: &Ui, rect: Rect) {
             .collect();
         ui.painter().add(egui::Shape::line(pts, egui::Stroke::new((2.3 - 0.25 * i as f32) * s, ink)));
     }
+}
+
+/// Deezer badge: purple with white equalizer bars
+fn deezer_badge(ui: &Ui, rect: Rect) {
+    ui.painter().rect_filled(rect, rect.width() * 0.27, DEEZER);
+    let s = rect.width() / 24.0;
+    let c = rect.center();
+    let white = Color32::WHITE;
+    let bar_w = 2.4 * s;
+    let gap = 1.4 * s;
+    let heights = [5.5 * s, 9.5 * s, 13.0 * s, 8.0 * s];
+    let total_w = 4.0 * bar_w + 3.0 * gap;
+    let start_x = c.x - total_w / 2.0;
+    for (i, &h) in heights.iter().enumerate() {
+        let bx = start_x + i as f32 * (bar_w + gap);
+        let by = c.y + 5.5 * s - h;
+        ui.painter().rect_filled(Rect::from_min_size(pos2(bx, by), vec2(bar_w, h)), 1.0 * s, white);
+    }
+}
+
+/// YouTube Music badge: red with white play circle & triangle
+fn ytm_badge(ui: &Ui, rect: Rect) {
+    ui.painter().rect_filled(rect, rect.width() * 0.27, YTM_RED);
+    let s = rect.width() / 24.0;
+    let c = rect.center();
+    let white = Color32::WHITE;
+    ui.painter().circle_stroke(c, 7.0 * s, egui::Stroke::new(1.8 * s, white));
+    let tri = vec![
+        pos2(c.x - 2.4 * s, c.y - 3.8 * s),
+        pos2(c.x - 2.4 * s, c.y + 3.8 * s),
+        pos2(c.x + 4.0 * s, c.y),
+    ];
+    ui.painter().add(egui::Shape::convex_polygon(tri, white, egui::Stroke::NONE));
+}
+
+/// SoundCloud badge: orange with white waveform bars
+fn soundcloud_badge(ui: &Ui, rect: Rect) {
+    ui.painter().rect_filled(rect, rect.width() * 0.27, SOUNDCLOUD);
+    let s = rect.width() / 24.0;
+    let c = rect.center();
+    let white = Color32::WHITE;
+    let heights = [4.0 * s, 7.5 * s, 10.0 * s, 6.5 * s, 11.5 * s, 8.5 * s];
+    let bar_w = 1.6 * s;
+    let gap = 1.0 * s;
+    let total_w = 6.0 * bar_w + 5.0 * gap;
+    let start_x = c.x - total_w / 2.0;
+    for (i, &h) in heights.iter().enumerate() {
+        let bx = start_x + i as f32 * (bar_w + gap);
+        let by = c.y + 5.0 * s - h;
+        ui.painter().rect_filled(Rect::from_min_size(pos2(bx, by), vec2(bar_w, h)), 0.7 * s, white);
+    }
+}
+
+fn badge(ui: &Ui, rect: Rect) {
+    spotify_badge(ui, rect);
+}
+
+fn platform_pill(ui: &mut Ui, label: &str, draw: fn(&Ui, Rect)) {
+    let h = 26.0;
+    let icon_sz = 17.0;
+    let font = theme::semibold(12.0);
+    let galley = widgets::galley(ui, label, font, theme::text(), 200.0);
+    let w = icon_sz + 8.0 + galley.size().x + 18.0;
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+    let hov = theme::anim_bool(ui.ctx(), resp.id.with("hov"), resp.hovered(), 0.15);
+    let bg = theme::glass(0.08 + 0.05 * hov);
+    ui.painter().rect_filled(rect, 8.0, bg);
+    ui.painter().rect_stroke(rect, 8.0, egui::Stroke::new(1.0, theme::glass(0.12 + 0.08 * hov)), egui::StrokeKind::Inside);
+    let icon_rect = Rect::from_center_size(pos2(rect.left() + 9.0 + icon_sz / 2.0, rect.center().y), vec2(icon_sz, icon_sz));
+    draw(ui, icon_rect);
+    let text_pos = pos2(rect.left() + 9.0 + icon_sz + 7.0, rect.center().y - galley.size().y / 2.0);
+    ui.painter().galley(text_pos, galley, theme::text());
 }
 
 fn radio(ui: &Ui, center: egui::Pos2, on: f32, accent: Color32) {
@@ -196,13 +294,26 @@ fn setup(app: &mut App, ui: &mut Ui) {
     breadcrumb(app, ui);
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        let (r, _) = ui.allocate_exact_size(vec2(40.0, 40.0), Sense::hover());
-        badge(ui, r);
-        ui.add_space(6.0);
-        ui.label(RichText::new("Transfer from Spotify").font(theme::bold(30.0)).color(theme::text()));
+        let sz = 30.0;
+        let (r1, _) = ui.allocate_exact_size(vec2(sz, sz), Sense::hover());
+        apple_badge(ui, r1);
+        ui.add_space(5.0);
+        let (r2, _) = ui.allocate_exact_size(vec2(sz, sz), Sense::hover());
+        spotify_badge(ui, r2);
+        ui.add_space(5.0);
+        let (r3, _) = ui.allocate_exact_size(vec2(sz, sz), Sense::hover());
+        deezer_badge(ui, r3);
+        ui.add_space(5.0);
+        let (r4, _) = ui.allocate_exact_size(vec2(sz, sz), Sense::hover());
+        ytm_badge(ui, r4);
+        ui.add_space(5.0);
+        let (r5, _) = ui.allocate_exact_size(vec2(sz, sz), Sense::hover());
+        soundcloud_badge(ui, r5);
+        ui.add_space(10.0);
+        ui.label(RichText::new("Import Playlist").font(theme::bold(30.0)).color(theme::text()));
     });
     ui.add_space(4.0);
-    dim(ui, "Copy your Liked Songs or any playlist into YouTube Music. It runs in the background, so you can keep listening.");
+    dim(ui, "Copy any playlist from Apple Music, Spotify, Deezer, or other platforms into YouTube Music.");
     ui.add_space(18.0);
 
     if !app.logged_in {
@@ -301,15 +412,27 @@ fn setup(app: &mut App, ui: &mut Ui) {
                     }
                 }
                 ui.add_space(14.0);
-                dim(ui, "Or paste any playlist link");
-                ui.add_space(6.0);
+                dim(ui, "Paste playlist link from any supported music platform:");
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    platform_pill(ui, "Apple Music", apple_badge);
+                    ui.add_space(6.0);
+                    platform_pill(ui, "Spotify", spotify_badge);
+                    ui.add_space(6.0);
+                    platform_pill(ui, "Deezer", deezer_badge);
+                    ui.add_space(6.0);
+                    platform_pill(ui, "YouTube Music", ytm_badge);
+                    ui.add_space(6.0);
+                    platform_pill(ui, "SoundCloud", soundcloud_badge);
+                });
+                ui.add_space(10.0);
                 let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 42.0), Sense::hover());
                 ui.painter().rect_filled(rect, 10.0, theme::glass(0.08));
                 let inner = rect.shrink2(vec2(14.0, 4.0));
                 let edit = ui.put(
                     inner,
                     egui::TextEdit::singleline(&mut app.xfer.link)
-                        .hint_text(RichText::new("https://open.spotify.com/playlist/…").color(theme::text_faint()))
+                        .hint_text(RichText::new("https://music.apple.com/... or Spotify, Deezer link").color(theme::text_faint()))
                         .font(theme::regular(14.0))
                         .frame(egui::Frame::NONE)
                         .align(egui::Align2::LEFT_CENTER)

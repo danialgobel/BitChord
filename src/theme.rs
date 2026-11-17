@@ -476,6 +476,19 @@ fn family(key: &str, weight: crate::preset::Weight, size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(format!("{key}-{w}").into()))
 }
 
+/// Returns a FontId to preview the font named `name` (bundled or installed).
+pub fn font_preview_id(name: &str, selected: bool) -> FontId {
+    let size = 14.5;
+    let w = if selected { 1 } else { 0 };
+    if let Some(key) = lyric_key(name) {
+        return FontId::new(size, FontFamily::Name(format!("{key}-{w}").into()));
+    }
+    if name.eq_ignore_ascii_case("inter") {
+        return FontId::new(size, FontFamily::Name(format!("inter-{w}").into()));
+    }
+    FontId::new(size, FontFamily::Name(format!("preview:{name}").into()))
+}
+
 /// Lyric font for a preset's font name and weight.
 pub fn lyric_font(name: &str, weight: crate::preset::Weight, size: f32) -> FontId {
     family(font_key(name), weight, size)
@@ -732,9 +745,10 @@ pub fn install_fonts(ctx: &egui::Context, ui_font: &str) {
     load_choice(ui_font);
     let ui_key = font_key(ui_font);
     // Installing rebuilds the font atlas; most themes share a UI font, so skip repeats.
-    static INSTALLED: std::sync::Mutex<Option<(&'static str, String)>> = std::sync::Mutex::new(None);
+    static INSTALLED: std::sync::Mutex<Option<(&'static str, String, bool)>> = std::sync::Mutex::new(None);
     let loaded = CHOICE.read().unwrap().as_ref().map(|c| c.name.clone()).unwrap_or_default();
-    let state = Some((ui_key, loaded));
+    let has_installed = INSTALLED_FONTS.get().is_some();
+    let state = Some((ui_key, loaded, has_installed));
     {
         let mut installed = INSTALLED.lock().unwrap();
         if *installed == state {
@@ -808,6 +822,28 @@ pub fn install_fonts(ctx: &egui::Context, ui_font: &str) {
         for w in 0..3 {
             let inter = defs.families[&FontFamily::Name(format!("inter-{w}").into())].clone();
             defs.families.insert(FontFamily::Name(format!("choice-{w}").into()), inter);
+        }
+    }
+
+    // Register preview families for all installed system fonts so font picker can render each in its own typeface
+    if let Some(installed) = INSTALLED_FONTS.get() {
+        let inter_chain = defs.families.get(&FontFamily::Name("inter-0".into())).cloned().unwrap_or_default();
+        for f in installed {
+            let key = format!("preview:{}", f.name);
+            let family_key = FontFamily::Name(key.clone().into());
+            if defs.families.contains_key(&family_key) {
+                continue;
+            }
+            if let Some(best) = f.faces.iter().min_by_key(|face| (face.weight - 400.0).abs() as i32) {
+                if let Some(bytes) = map(&best.path) {
+                    let face_data = font_data(Face { bytes, index: best.index, wght: best.wght.map(|(lo, hi)| 400.0_f32.clamp(lo, hi)) }, 0.0);
+                    let data_id = format!("fontdata:{key}");
+                    defs.font_data.insert(data_id.clone(), Arc::new(face_data));
+                    let mut chain = vec![data_id];
+                    chain.extend(inter_chain.iter().cloned());
+                    defs.families.insert(family_key, chain);
+                }
+            }
         }
     }
     // The same bytes get the same `Arc` on every install, so comparing these definitions

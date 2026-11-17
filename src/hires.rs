@@ -62,8 +62,12 @@ impl Info {
             "Lossless"
         } else if self.bitrate_kbps.is_some_and(|k| k >= 320) {
             "320 kbps"
+        } else if self.bitrate_kbps.is_some_and(|k| k >= 240) {
+            "AAC 256k"
+        } else if self.codec.eq_ignore_ascii_case("opus") {
+            "Opus 160k"
         } else {
-            "High"
+            "High Quality"
         }
     }
 }
@@ -265,11 +269,8 @@ impl Client {
         if size == 0 {
             size = content_size(http, &stated_url).await.unwrap_or(0);
         }
-        // Some addon URLs only reveal their size once the stream starts; use a placeholder
-        // large enough for ranged reads and let the download determine the real end.
         if size == 0 {
-            log::info!("hi-res: stream size unknown for \"{}\", using ranged placeholder", candidate.title);
-            size = 512 * 1024 * 1024;
+            anyhow::bail!("hi-res stream URL is not reachable or returned 0 bytes ({stated_url})");
         }
         let sample_rate = json.get("sampleRate").and_then(Value::as_f64).filter(|r| *r > 0.0).map(|r| if r < 1000.0 { (r * 1000.0) as u32 } else { r as u32 })
             .or_else(|| number_before(&label, "khz").map(|r| (r * 1000.0) as u32));

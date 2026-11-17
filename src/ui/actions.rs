@@ -236,6 +236,24 @@ impl App {
     }
 
     pub(super) fn shortcuts(&mut self, ctx: &egui::Context) {
+        let (zoom_in, zoom_out, zoom_reset) = ctx.input(|i| {
+            let cmd = i.modifiers.command || i.modifiers.ctrl;
+            (
+                cmd && (i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals)),
+                cmd && i.key_pressed(egui::Key::Minus),
+                cmd && i.key_pressed(egui::Key::Num0),
+            )
+        });
+        if zoom_in {
+            let z = (ctx.zoom_factor() + 0.08).min(1.4);
+            ctx.set_zoom_factor(z);
+        } else if zoom_out {
+            let z = (ctx.zoom_factor() - 0.08).max(0.65);
+            ctx.set_zoom_factor(z);
+        } else if zoom_reset {
+            ctx.set_zoom_factor(1.0);
+        }
+
         let typing = ctx.egui_wants_keyboard_input();
         // In a text box, Ctrl+arrows move the cursor by words (and lines) instead; on a
         // focused button or slider they still skip and change the volume.

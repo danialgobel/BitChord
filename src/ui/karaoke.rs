@@ -30,6 +30,7 @@ use egui::{Color32, ColorImage, FontId, Galley, Mesh, Pos2, Rect, Shape, Texture
 use crate::lyrics::{Line, Lyrics, Part, Sync};
 use crate::preset::{BlurScope, Fill, LyricStyle, ThemeCss, Weight};
 use crate::theme;
+use crate::ui::lyric_prefs::LyricAnimMode;
 
 // ------------------------------------------------------------------ easing
 
@@ -817,14 +818,23 @@ pub struct Frame<'a> {
     pub centered: bool,
     /// The listener's lyrics text size, a multiple of the theme's.
     pub scale: f32,
+    pub anim_mode: LyricAnimMode,
+    pub title: Option<&'a str>,
+    pub artist: Option<&'a str>,
+    pub thumbs: &'a [crate::model::Thumb],
 }
 
+#[derive(Default)]
 pub struct Out {
     pub seek: Option<f64>,
     /// Something is moving: keep drawing frames.
     pub animating: bool,
     /// The reader scrolled away; a "resume" control can bring the view back.
     pub user_scrolling: bool,
+    pub return_to_prev_mode: bool,
+    pub toggle_play: bool,
+    pub next_track: bool,
+    pub prev_track: bool,
 }
 
 impl View {
@@ -1023,6 +1033,30 @@ impl View {
         let mut glow_work: Vec<GlowJob> = Vec::new();
         let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
 
+        if f.anim_mode == LyricAnimMode::Constellation {
+            return paint_constellation_view(&painter, &ctx, &cfg, &f, layout, t, rect);
+        }
+        if f.anim_mode == LyricAnimMode::ConvexLens {
+            let out = paint_convex_lens_view(&mut self.glow, &painter, &ctx, &cfg, &f, layout, t, rect, atlas, ppp);
+            self.glow.finish(&ctx, &painter, Vec::new(), atlas, ppp);
+            return out;
+        }
+        if f.anim_mode == LyricAnimMode::PhysicsThrow {
+            let out = paint_physics_throw_view(&mut self.glow, &painter, &ctx, &cfg, &f, layout, t, rect, atlas, ppp);
+            self.glow.finish(&ctx, &painter, Vec::new(), atlas, ppp);
+            return out;
+        }
+        if f.anim_mode == LyricAnimMode::CodeEditor {
+            let out = paint_code_editor_view(&mut self.glow, &painter, &ctx, &cfg, &f, layout, t, rect, atlas, ppp);
+            self.glow.finish(&ctx, &painter, Vec::new(), atlas, ppp);
+            return out;
+        }
+        if f.anim_mode == LyricAnimMode::Chat {
+            let out = paint_chat_view(&painter, &ctx, &cfg, &f, layout, t, rect, atlas, ppp);
+            self.glow.finish(&ctx, &painter, Vec::new(), atlas, ppp);
+            return out;
+        }
+
         for (i, b) in layout.blocks.iter().enumerate() {
             let mut dy = 0.0;
             for a in &self.scrolls {
@@ -1174,7 +1208,11 @@ impl View {
                 animating |= st.exit.is_some();
             } else {
                 let lit = LitState::new(&cfg, st, t, f.now, sung_now || st.selected);
-                paint_words(&painter, &ctx, &cfg, &b.words, &b.groups, &xf, &lit, dim, opacity, atlas, &mut glow_work, (f.key, i, 0));
+                if f.anim_mode == LyricAnimMode::KineticPop {
+                    paint_words_kinetic(&painter, &ctx, &cfg, &b.words, &xf, &lit, dim, opacity, atlas, &mut glow_work, (f.key, i, 0), &mut animating);
+                } else {
+                    paint_words(&painter, &ctx, &cfg, &b.words, &b.groups, &xf, &lit, dim, opacity, atlas, &mut glow_work, (f.key, i, 0));
+                }
                 for (k, d) in b.decos.iter().enumerate() {
                     let dxf = xf;
                     let a = opacity;
@@ -1185,7 +1223,11 @@ impl View {
                     }
                     match &d.body {
                         DecoBody::Timed { words, groups } => {
-                            paint_words(&painter, &ctx, &cfg, words, groups, &dxf, &lit, dim, a, atlas, &mut glow_work, (f.key, i, k as u32 + 1));
+                            if f.anim_mode == LyricAnimMode::KineticPop {
+                                paint_words_kinetic(&painter, &ctx, &cfg, words, &dxf, &lit, dim, a, atlas, &mut glow_work, (f.key, i, k as u32 + 1), &mut animating);
+                            } else {
+                                paint_words(&painter, &ctx, &cfg, words, groups, &dxf, &lit, dim, a, atlas, &mut glow_work, (f.key, i, k as u32 + 1));
+                            }
                         }
                         DecoBody::Text(text, font) => {
                             let wrap = d.rect.width() + 1.0;
@@ -1217,7 +1259,7 @@ impl View {
         if f.playing {
             animating = true;
         }
-        Out { seek, animating, user_scrolling: user }
+        Out { seek, animating, user_scrolling: user, ..Default::default() }
     }
 
     fn relayout(&mut self, ui: &mut egui::Ui, cfg: &Cfg, f: &Frame, key: u64, rect: Rect) {
@@ -1803,6 +1845,2265 @@ fn paint_words(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn paint_words_kinetic(
+    painter: &egui::Painter,
+    ctx: &egui::Context,
+    cfg: &Cfg,
+    words: &[Word],
+    xf: &Xf,
+    lit: &LitState,
+    dim: f32,
+    opacity: f32,
+    atlas: [usize; 2],
+    glow: &mut Vec<GlowJob>,
+    key: (u64, usize, u32),
+    animating: &mut bool,
+) {
+    let no_cut: [f32; 0] = [];
+    if !lit.live {
+        let mut base = Mesh::with_texture(TextureId::default());
+        for w in words {
+            let quads = word_glyphs(ctx, w, lit, cfg, None, atlas);
+            let dim_c = if w.bg { dim * 0.78 } else { dim } * opacity;
+            let c = if lit.t < w.start {
+                theme::with_alpha(Color32::WHITE, dim_c)
+            } else {
+                theme::with_alpha(Color32::WHITE, (dim_c * 1.5).min(opacity * 0.85))
+            };
+            for q in &quads {
+                push_quad(&mut base, xf.rect(q.rect), q.uv, c, &|_| 1.0, &no_cut);
+            }
+        }
+        painter.add(Shape::mesh(base));
+        return;
+    }
+
+    let mut base_mesh = Mesh::with_texture(TextureId::default());
+
+    for (wi, w) in words.iter().enumerate() {
+        let quads = word_glyphs(ctx, w, lit, cfg, None, atlas);
+        let word_c = pos2(w.pos.x + w.w * 0.5, w.pos.y + w.h * 0.5);
+        let dim_c = if w.bg { dim * 0.78 } else { dim } * opacity;
+
+        // Case 1: Upcoming word in this live line -> render in standby dimmed state so it never vanishes
+        if !w.line_synced && lit.t < w.start {
+            let standby_color = theme::with_alpha(Color32::WHITE, dim_c);
+            for q in &quads {
+                push_quad(&mut base_mesh, xf.rect(q.rect), q.uv, standby_color, &|_| 1.0, &no_cut);
+            }
+            continue;
+        }
+
+        // Case 2: Active or passed word
+        let dt = (lit.t - w.start).max(0.0) as f32;
+        let is_popping = !w.line_synced && dt < 0.18;
+        if is_popping {
+            *animating = true;
+        }
+
+        let (pop_scale, pop_dy, pop_alpha) = if is_popping {
+            let p = (dt / 0.18).clamp(0.0, 1.0);
+            let s = if p < 0.50 {
+                egui::lerp(1.0..=1.16, p / 0.50)
+            } else {
+                egui::lerp(1.16..=1.0, (p - 0.50) / 0.50)
+            };
+            let dy = (1.0 - p) * -3.5;
+            let a = egui::lerp(dim_c..=1.0, (p / 0.45).min(1.0));
+            (s, dy, a)
+        } else {
+            (1.0, 0.0, 1.0)
+        };
+
+        let active = if w.line_synced { true } else { dt <= w.dur.max(0.12) as f32 };
+        if active {
+            *animating = true;
+        }
+
+        let text_color = if active {
+            Color32::WHITE
+        } else {
+            theme::with_alpha(Color32::WHITE, 0.90)
+        };
+        let color = theme::with_alpha(text_color, pop_alpha * opacity);
+
+        let mut m = Mesh::with_texture(TextureId::default());
+        let mut screen_quads = Vec::with_capacity(quads.len());
+        for q in &quads {
+            let r_local = Rect::from_min_max(
+                word_c + (q.rect.min - word_c) * pop_scale,
+                word_c + (q.rect.max - word_c) * pop_scale,
+            ).translate(vec2(0.0, pop_dy));
+            let r_screen = xf.rect(r_local);
+            push_quad(&mut m, r_screen, q.uv, color, &|_| 1.0, &no_cut);
+            screen_quads.push((r_screen, q.uv, q.letter, q.letters, 1.0));
+        }
+        painter.add(Shape::mesh(m));
+
+        if active && !dev_off("glow") {
+            let word_box = xf.rect(Rect::from_min_size(w.pos, vec2(w.w, w.h)));
+            let look = WordLook {
+                start: 0.0,
+                end: 1.0,
+                glow: 16.0 * xf.scale,
+                glow_alpha: 0.95,
+                opacity: pop_alpha,
+            };
+            glow.push(GlowJob {
+                key: (key.0, key.1, key.2, wi as u32),
+                quads: screen_quads,
+                word: word_box,
+                by_letter: false,
+                rtl: w.rtl,
+                radius: 16.0 * xf.scale,
+                pills: Vec::new(),
+                color: theme::with_alpha(cfg.glow, 0.85 * pop_alpha * opacity),
+                look,
+                layer: painter.add(Shape::Noop),
+            });
+        }
+    }
+
+    if !base_mesh.is_empty() {
+        painter.add(Shape::mesh(base_mesh));
+    }
+}
+
+fn paint_constellation_view(
+    painter: &egui::Painter,
+    ctx: &egui::Context,
+    cfg: &Cfg,
+    f: &Frame,
+    layout: &Layout,
+    t: f64,
+    rect: Rect,
+) -> Out {
+    let lines_n = layout.blocks.iter().filter(|b| b.line.is_some()).count();
+    if lines_n == 0 {
+        return Out { seek: None, animating: false, user_scrolling: false, ..Default::default() };
+    }
+
+    let active_idx = (0..lines_n)
+        .find(|&i| t >= layout.blocks[i].start && t < layout.blocks[i].start + layout.blocks[i].dur)
+        .or_else(|| (0..lines_n).find(|&i| t < layout.blocks[i].start))
+        .unwrap_or(lines_n.saturating_sub(1));
+
+    let mut seek = None;
+    let pointer = ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
+    let clicked = ctx.input(|i| i.pointer.primary_clicked());
+
+    // Context: Previous line at the top
+    if active_idx > 0 {
+        let prev_b = &layout.blocks[active_idx - 1];
+        let prev_text: String = prev_b.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join("");
+        if !prev_text.trim().is_empty() {
+            let prev_rect = Rect::from_center_size(pos2(rect.center().x, rect.top() + 32.0), vec2(rect.width() - 80.0, 36.0));
+            let hover = pointer.is_some_and(|p| prev_rect.contains(p));
+            if hover {
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                if clicked {
+                    seek = Some(prev_b.start);
+                }
+            }
+            let font = theme::lyric_font_for(&cfg.font, Weight::Regular, 14.5, &prev_text);
+            let col = theme::with_alpha(Color32::WHITE, if hover { 0.75 } else { 0.30 });
+            painter.text(prev_rect.center(), egui::Align2::CENTER_CENTER, prev_text, font, col);
+        }
+    }
+
+    // Context: Next line at the bottom
+    if active_idx + 1 < lines_n {
+        let next_b = &layout.blocks[active_idx + 1];
+        let next_text: String = next_b.words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join("");
+        if !next_text.trim().is_empty() {
+            let next_rect = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 36.0), vec2(rect.width() - 80.0, 36.0));
+            let hover = pointer.is_some_and(|p| next_rect.contains(p));
+            if hover {
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                if clicked {
+                    seek = Some(next_b.start);
+                }
+            }
+            let font = theme::lyric_font_for(&cfg.font, Weight::Regular, 14.5, &next_text);
+            let col = theme::with_alpha(Color32::WHITE, if hover { 0.75 } else { 0.30 });
+            painter.text(next_rect.center(), egui::Align2::CENTER_CENTER, next_text, font, col);
+        }
+    }
+
+    let b = &layout.blocks[active_idx];
+    let words: Vec<&Word> = b.words.iter().filter(|w| !w.bg).collect();
+    let n = words.len();
+
+    if n == 0 {
+        let center = rect.center();
+        let pulse = (f.now * 2.0).sin().abs() as f32;
+        painter.circle_filled(center, 22.0 + pulse * 10.0, Color32::from_rgba_unmultiplied(255, 105, 180, 40));
+        painter.circle_filled(center, 6.0, Color32::WHITE);
+        let label = if b.instrumental { "Instrumental" } else { "• • •" };
+        let font = theme::lyric_font_for(&cfg.font, Weight::Semibold, 16.0, label);
+        painter.text(center + vec2(0.0, 26.0), egui::Align2::CENTER_TOP, label, font, theme::with_alpha(Color32::WHITE, 0.6));
+        return Out { seek, animating: true, user_scrolling: false, ..Default::default() };
+    }
+
+    let bounds = rect.shrink2(vec2(60.0, 110.0));
+    let mut node_positions = Vec::with_capacity(n);
+    for i in 0..n {
+        let x = if n == 1 {
+            bounds.center().x
+        } else {
+            bounds.left() + (i as f32 / (n - 1) as f32) * bounds.width()
+        };
+        let alt = if i % 2 == 0 { -1.0 } else { 1.0 };
+        let wave = (i as f32 * 1.85 + (f.key % 19) as f32 * 0.1).sin();
+        let y_offset = (alt * 0.55 + wave * 0.45) * (bounds.height() * 0.35);
+        let y = bounds.center().y + y_offset;
+        node_positions.push(pos2(x, y));
+    }
+
+    // Constellation lines
+    for i in 0..n.saturating_sub(1) {
+        let p0 = node_positions[i];
+        let p1 = node_positions[i + 1];
+        painter.line_segment([p0, p1], egui::Stroke::new(3.0, Color32::from_rgba_unmultiplied(255, 110, 195, 45)));
+        painter.line_segment([p0, p1], egui::Stroke::new(1.2, Color32::from_rgba_unmultiplied(255, 215, 240, 130)));
+    }
+
+    // Star nodes & words
+    for i in 0..n {
+        let w = words[i];
+        let p = node_positions[i];
+        let sung = t >= w.start;
+        let active = sung && (t <= w.start + w.dur.max(0.18));
+
+        if pointer.is_some_and(|ptr| ptr.distance(p) < 28.0) {
+            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+            if clicked {
+                seek = Some(w.start);
+            }
+        }
+
+        if !sung {
+            painter.circle_filled(p, 3.0, Color32::from_rgba_unmultiplied(255, 150, 200, 100));
+        } else {
+            painter.circle_filled(p, 9.0, Color32::from_rgba_unmultiplied(255, 100, 190, 80));
+            painter.circle_filled(p, 3.5, Color32::WHITE);
+            let flare_r = if active { 7.0 } else { 4.0 };
+            painter.line_segment([p - vec2(flare_r, 0.0), p + vec2(flare_r, 0.0)], egui::Stroke::new(1.0, Color32::WHITE));
+            painter.line_segment([p - vec2(0.0, flare_r), p + vec2(0.0, flare_r)], egui::Stroke::new(1.0, Color32::WHITE));
+        }
+
+        let is_above = p.y >= bounds.center().y;
+        let text_pos = if is_above {
+            pos2(p.x, p.y - 18.0)
+        } else {
+            pos2(p.x, p.y + 18.0)
+        };
+        let align = if is_above { egui::Align2::CENTER_BOTTOM } else { egui::Align2::CENTER_TOP };
+
+        let font_size = (cfg.size * 0.85).clamp(18.0, 34.0);
+        let font = theme::lyric_font_for(&cfg.font, if active { Weight::Bold } else { Weight::Semibold }, font_size, &w.text);
+
+        if active {
+            painter.text(text_pos + vec2(0.0, 1.0), align, &w.text, font.clone(), Color32::from_rgba_unmultiplied(255, 90, 180, 160));
+            painter.text(text_pos, align, &w.text, font, Color32::WHITE);
+        } else if sung {
+            painter.text(text_pos, align, &w.text, font, theme::with_alpha(Color32::WHITE, 0.88));
+        } else {
+            painter.text(text_pos, align, &w.text, font, theme::with_alpha(Color32::WHITE, 0.30));
+        }
+    }
+
+    // Traveling Star Cursor
+    let (star_pos, star_frac) = if t <= words[0].start {
+        (node_positions[0], 0.0)
+    } else if t >= words[n - 1].start + words[n - 1].dur {
+        (node_positions[n - 1], 1.0)
+    } else {
+        let mut k = 0;
+        for idx in 0..n {
+            if words[idx].start <= t {
+                k = idx;
+            } else {
+                break;
+            }
+        }
+        let t0 = words[k].start;
+        let t1 = if k + 1 < n { words[k + 1].start } else { words[k].start + words[k].dur.max(0.2) };
+        let raw_frac = ((t - t0) / (t1 - t0).max(0.01)).clamp(0.0, 1.0) as f32;
+        let s = raw_frac * raw_frac * (3.0 - 2.0 * raw_frac);
+        let p0 = node_positions[k];
+        let p1 = if k + 1 < n { node_positions[k + 1] } else { p0 };
+        (pos2(egui::lerp(p0.x..=p1.x, s), egui::lerp(p0.y..=p1.y, s)), raw_frac)
+    };
+
+    painter.circle_filled(star_pos, 22.0, Color32::from_rgba_unmultiplied(255, 60, 170, 50));
+    painter.circle_filled(star_pos, 11.0, Color32::from_rgba_unmultiplied(255, 120, 210, 120));
+    painter.circle_filled(star_pos, 4.0, Color32::WHITE);
+    painter.rect_filled(Rect::from_center_size(star_pos, vec2(36.0, 1.8)), 0.9, Color32::from_rgba_unmultiplied(255, 235, 250, 230));
+    painter.rect_filled(Rect::from_center_size(star_pos, vec2(1.8, 36.0)), 0.9, Color32::from_rgba_unmultiplied(255, 235, 250, 230));
+    painter.circle_filled(star_pos, 6.0, Color32::from_rgba_unmultiplied(255, 200, 240, 160));
+
+    if star_frac < 0.25 {
+        let r_rip = (star_frac / 0.25) * 22.0;
+        let a_rip = (1.0 - star_frac / 0.25) * 0.65;
+        painter.circle_stroke(star_pos, r_rip, egui::Stroke::new(1.5, theme::with_alpha(Color32::from_rgb(255, 105, 180), a_rip)));
+    }
+
+    if let Some(tr) = f.trans.get(active_idx).copied().flatten() {
+        let tr_rect = Rect::from_center_size(pos2(rect.center().x, bounds.bottom() + 20.0), vec2(rect.width() - 80.0, 28.0));
+        let tr_font = theme::lyric_font_for(&cfg.font, Weight::Regular, 14.5, tr);
+        painter.text(tr_rect.center(), egui::Align2::CENTER_CENTER, tr, tr_font, theme::with_alpha(Color32::WHITE, 0.75));
+    }
+
+    Out {
+        seek,
+        animating: true,
+        user_scrolling: false,
+        ..Default::default()
+    }
+}
+
+fn paint_convex_lens_view(
+    glow: &mut Glow,
+    painter: &egui::Painter,
+    ctx: &egui::Context,
+    cfg: &Cfg,
+    f: &Frame,
+    layout: &Layout,
+    t: f64,
+    rect: Rect,
+    atlas: [usize; 2],
+    ppp: f32,
+) -> Out {
+    struct LensWord {
+        text: String,
+        start: f64,
+        dur: f64,
+        line_idx: usize,
+    }
+
+    let mut all_words: Vec<LensWord> = Vec::new();
+    for (li, b) in layout.blocks.iter().enumerate() {
+        if b.line.is_none() || b.instrumental {
+            continue;
+        }
+        if !b.groups.is_empty() {
+            for g in &b.groups {
+                let slice = &b.words[g.words.clone()];
+                let non_bg: Vec<&Word> = slice.iter().filter(|w| !w.bg).collect();
+                if non_bg.is_empty() {
+                    continue;
+                }
+                let text: String = non_bg.iter().map(|w| w.text.as_str()).collect();
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                let start = non_bg.first().map(|w| w.start).unwrap_or(b.start);
+                let end = non_bg.last().map(|w| w.start + w.dur.max(0.0)).unwrap_or(start + 0.3);
+                let dur = (end - start).max(0.1);
+                all_words.push(LensWord {
+                    text,
+                    start,
+                    dur,
+                    line_idx: li,
+                });
+            }
+        } else {
+            for w in b.words.iter().filter(|w| !w.bg) {
+                let text = w.text.trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                all_words.push(LensWord {
+                    text,
+                    start: w.start,
+                    dur: w.dur.max(0.1),
+                    line_idx: li,
+                });
+            }
+        }
+    }
+
+    let mut seek = None;
+    let pointer = ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
+    let clicked = ctx.input(|i| i.pointer.primary_clicked());
+    let center = rect.center();
+
+    if all_words.is_empty() {
+        let pulse = (f.now * 2.0).sin().abs() as f32;
+        painter.circle_filled(center, 24.0 + pulse * 8.0, Color32::from_rgba_unmultiplied(255, 180, 50, 45));
+        painter.circle_filled(center, 6.0, Color32::WHITE);
+        let label = "Instrumental";
+        let font = theme::lyric_font_for(&cfg.font, Weight::Semibold, 16.0, label);
+        painter.text(center + vec2(0.0, 32.0), egui::Align2::CENTER_TOP, label, font, theme::with_alpha(Color32::WHITE, 0.65));
+        return Out { seek: None, animating: true, user_scrolling: false, ..Default::default() };
+    }
+
+    let n = all_words.len();
+    let mut k = 0;
+    for (idx, w) in all_words.iter().enumerate() {
+        if t >= w.start {
+            k = idx;
+        } else {
+            break;
+        }
+    }
+
+    // Hero active size and slot height (massive, high-impact focus typography)
+    let hero_size = ((cfg.size * 5.0).clamp(118.0, 210.0)).min(rect.height() * 0.36).round();
+    let slot_size = (hero_size * 0.50).round();
+    let slot_h = hero_size * 1.15;
+
+    let curr = &all_words[k];
+
+    // Helper: Ken Perlin's Smootherstep (zero velocity and zero acceleration at endpoints)
+    let smootherstep = |p: f32| -> f32 {
+        let p = p.clamp(0.0, 1.0);
+        p * p * p * (p * (p * 6.0 - 15.0) + 10.0)
+    };
+
+    // Slide transition calculation (moves upward from bottom to center)
+    let (slide, is_transitioning) = if t < all_words[0].start {
+        // Pre-song lead-in: word 0 slides up into center just before singing begins
+        let lead = (all_words[0].start - t) as f32;
+        if lead <= 0.40 {
+            let p = ((0.40 - lead) / 0.40).clamp(0.0, 1.0);
+            (smootherstep(p), true)
+        } else {
+            (0.0, false)
+        }
+    } else {
+        // Active word transition duration: luxurious fluid glide (0.28s to 0.38s)
+        let tau = (curr.dur * 0.48).clamp(0.28, 0.38) as f32;
+        let elapsed = (t - curr.start).max(0.0) as f32;
+        let p = (elapsed / tau).clamp(0.0, 1.0);
+        (smootherstep(p), p < 1.0)
+    };
+
+    // Vertical animation offset: when slide goes from 0 -> 1, words move UP by slot_h
+    let anim_dy = (1.0 - slide) * slot_h;
+
+    // Render candidate words in the visible focal window [k-2 ..= k+2]
+    let start_i = (k as isize - 2).max(0) as usize;
+    let end_i = ((k + 2) as usize).min(n - 1);
+
+    for i in start_i..=end_i {
+        let w = &all_words[i];
+        let rel_idx = i as isize - k as isize;
+        let y = center.y + (rel_idx as f32) * slot_h + anim_dy;
+
+        // Relative distance from canvas center in units of slot_h
+        let dist = (y - center.y) / slot_h;
+        let abs_d = dist.abs();
+
+        if abs_d >= 1.85 {
+            continue;
+        }
+
+        // Compute size, alpha, and blur radius continuously
+        let (target_size, mut alpha, blur_r) = if abs_d <= 1.0 {
+            let factor = (1.0 - abs_d).clamp(0.0, 1.0);
+            let s = egui::lerp(slot_size..=hero_size, factor).round();
+            let a = egui::lerp(0.35..=1.0, factor);
+            let b = (1.0 - factor) * 2.5;
+            (s, a, b)
+        } else {
+            let fade = ((1.85 - abs_d) / 0.85).clamp(0.0, 1.0);
+            (slot_size, 0.35 * fade, 2.5)
+        };
+
+        // Click-to-seek hit detection
+        let hit_box = Rect::from_center_size(pos2(center.x, y), vec2(rect.width() - 40.0, slot_h * 0.85));
+        let is_hover = pointer.is_some_and(|p| hit_box.contains(p));
+        if is_hover && abs_d <= 1.25 {
+            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+            alpha = (alpha * 1.35).min(1.0);
+            if clicked {
+                seek = Some(w.start);
+            }
+        }
+
+        if alpha < 0.01 {
+            continue;
+        }
+
+        // Dynamic horizontal fit so long words don't clip
+        let mut cur_size = target_size;
+        let probe_font = theme::lyric_font_for(&cfg.font, Weight::Bold, cur_size, &w.text);
+        let text_w = painter.layout_no_wrap(w.text.clone(), probe_font, Color32::WHITE).size().x;
+        let max_w = (rect.width() - 48.0).max(40.0);
+        if text_w > max_w {
+            cur_size = (cur_size * (max_w / text_w)).clamp(22.0, target_size).round();
+        }
+
+        let font = theme::lyric_font_for(&cfg.font, Weight::Bold, cur_size, &w.text);
+
+        // Gaussian drop-shadow glow matching Kinetic Pop fidelity (cached per word for 60 FPS)
+        let glow_strength = ((0.65 - abs_d) / 0.65).clamp(0.0, 1.0);
+        let total_glow = glow_strength * glow_strength;
+        if total_glow > 0.05 && !dev_off("glow") {
+            let glow_radius = (hero_size * 0.16).clamp(16.0, 28.0);
+            let hero_font = theme::lyric_font_for(&cfg.font, Weight::Bold, hero_size, &w.text);
+            if let Some((tex_id, content_rect, uv)) = glow.focal_word_glow(ctx, (f.key, i), &w.text, hero_font, glow_radius, atlas, ppp) {
+                let glow_base = if cfg.glow.a() > 20 {
+                    cfg.glow
+                } else if f.accent.a() > 20 {
+                    f.accent
+                } else {
+                    cfg.active
+                };
+                let glow_col = theme::with_alpha(glow_base, 0.90 * total_glow * alpha);
+                let scale = cur_size / hero_size;
+                let dest = Rect::from_center_size(pos2(center.x, y), content_rect.size() * scale);
+                painter.image(tex_id, dest, uv, glow_col);
+            }
+        }
+
+        // Draw text: multi-tap optical blur for outer slots, sharp 100% white for center
+        if blur_r > 0.6 {
+            let blur_taps = [
+                vec2(-blur_r, 0.0),
+                vec2(blur_r, 0.0),
+                vec2(0.0, -blur_r),
+                vec2(0.0, blur_r),
+            ];
+            let tap_alpha = (alpha * 0.25).clamp(0.005, 1.0);
+            let tap_color = theme::with_alpha(Color32::WHITE, tap_alpha);
+            for &offset in &blur_taps {
+                painter.text(pos2(center.x, y) + offset, egui::Align2::CENTER_CENTER, &w.text, font.clone(), tap_color);
+            }
+        } else {
+            painter.text(pos2(center.x, y), egui::Align2::CENTER_CENTER, &w.text, font, theme::with_alpha(Color32::WHITE, alpha));
+        }
+    }
+
+    // Translation or Romanization below the focal area if enabled
+    if let Some(tr) = f.trans.get(curr.line_idx).copied().flatten() {
+        let tr_y = (center.y + slot_h * 1.58).min(rect.bottom() - 28.0);
+        let tr_rect = Rect::from_center_size(pos2(center.x, tr_y), vec2(rect.width() - 80.0, 32.0));
+        let tr_font = theme::lyric_font_for(&cfg.font, Weight::Regular, 16.0, tr);
+        painter.text(tr_rect.center(), egui::Align2::CENTER_CENTER, tr, tr_font, theme::with_alpha(Color32::WHITE, 0.70));
+    }
+
+    // Native monitor refresh rate sync (120Hz/144Hz/VSync) during playback or slide transition
+    if f.playing || is_transitioning {
+        ctx.request_repaint();
+    }
+
+    Out {
+        seek,
+        animating: f.playing || is_transitioning,
+        user_scrolling: false,
+        ..Default::default()
+    }
+}
+
+// ------------------------------------------------------------------ physics throw
+
+fn paint_physics_throw_view(
+    glow: &mut Glow,
+    painter: &egui::Painter,
+    ctx: &egui::Context,
+    cfg: &Cfg,
+    f: &Frame,
+    layout: &Layout,
+    t: f64,
+    rect: Rect,
+    atlas: [usize; 2],
+    ppp: f32,
+) -> Out {
+    use std::f32::consts::PI;
+
+    // ── word list (identical builder as ConvexLens) ──────────────────────────
+    struct ThrowWord {
+        text: String,
+        start: f64,
+        dur: f64,
+        line_idx: usize,
+    }
+
+    let mut all_words: Vec<ThrowWord> = Vec::new();
+    for (li, b) in layout.blocks.iter().enumerate() {
+        if b.line.is_none() || b.instrumental {
+            continue;
+        }
+        if !b.groups.is_empty() {
+            for g in &b.groups {
+                let slice = &b.words[g.words.clone()];
+                let non_bg: Vec<&Word> = slice.iter().filter(|w| !w.bg).collect();
+                if non_bg.is_empty() {
+                    continue;
+                }
+                let text: String = non_bg.iter().map(|w| w.text.as_str()).collect();
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                let start = non_bg.first().map(|w| w.start).unwrap_or(b.start);
+                let end = non_bg.last().map(|w| w.start + w.dur.max(0.0)).unwrap_or(start + 0.3);
+                let dur = (end - start).max(0.1);
+                all_words.push(ThrowWord { text, start, dur, line_idx: li });
+            }
+        } else {
+            for w in b.words.iter().filter(|w| !w.bg) {
+                let text = w.text.trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                all_words.push(ThrowWord {
+                    text,
+                    start: w.start,
+                    dur: w.dur.max(0.1),
+                    line_idx: li,
+                });
+            }
+        }
+    }
+
+    let mut seek = None;
+    let pointer = ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
+    let clicked = ctx.input(|i| i.pointer.primary_clicked());
+    let center = rect.center();
+
+    // ── empty / instrumental placeholder ────────────────────────────────────
+    if all_words.is_empty() {
+        let pulse = (f.now * 2.0).sin().abs() as f32;
+        painter.circle_filled(center, 24.0 + pulse * 8.0, Color32::from_rgba_unmultiplied(80, 200, 120, 45));
+        painter.circle_filled(center, 6.0, Color32::WHITE);
+        let label = "Instrumental";
+        let font = theme::lyric_font_for(&cfg.font, Weight::Semibold, 16.0, label);
+        painter.text(center + vec2(0.0, 32.0), egui::Align2::CENTER_TOP, label, font, theme::with_alpha(Color32::WHITE, 0.65));
+        return Out { seek: None, animating: true, user_scrolling: false, ..Default::default() };
+    }
+
+    // ── find current word index k (last word whose start <= t) ────────────────
+    let n = all_words.len();
+    let mut k = 0usize;
+    for (idx, w) in all_words.iter().enumerate() {
+        if t >= w.start {
+            k = idx;
+        } else {
+            break;
+        }
+    }
+
+    // ── font size (identical to ConvexLens) ──────────────────────────────────
+    let hero_size = ((cfg.size * 5.0).clamp(118.0, 210.0)).min(rect.height() * 0.36).round();
+
+    // ── physics constants ─────────────────────────────────────────────────────
+    const ENTRY_DUR: f64 = 0.42;   // seconds: word is thrown upward
+    const G_FALL:    f32 = 2800.0; // px/s² gravity acceleration during free-fall
+
+    // Helper: derive per-word deterministic signature from text hash
+    let word_hash = |text: &str| -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for b in text.bytes() {
+            h ^= b as u64;
+            h = h.wrapping_mul(0x100000001b3);
+        }
+        h
+    };
+
+    struct ActiveItem {
+        text: String,
+        font: egui::FontId,
+        cur_size: f32,
+        hero_size: f32,
+        pos: Pos2,
+        roll_rad: f32,
+        yaw_rad: f32,
+        pitch_rad: f32,
+        glow_factor: f32,
+        word_idx: usize,
+        is_hoverable: bool,
+        start_time: f64,
+    }
+
+    let mut active_items: Vec<ActiveItem> = Vec::new();
+    let center_x = rect.center().x;
+    let center_y = rect.center().y;
+
+    // ── Candidate window around k: [k - 6 ..= k + 6] ─────────────────────────
+    let scan_start = k.saturating_sub(6);
+    let scan_end = (k + 6).min(n);
+
+    // 5 distinct spatial sectors across the canvas (kiri atas, kanan bawah, tengah, kiri bawah, kanan atas)
+    const SECTORS: [(f32, f32); 5] = [
+        (0.25, 0.26), // 0: Top-Left (agak kiri atas)
+        (0.75, 0.72), // 1: Bottom-Right (agak kanan bawah)
+        (0.50, 0.46), // 2: Center/Mid (tengah layar)
+        (0.26, 0.70), // 3: Bottom-Left (agak kiri bawah)
+        (0.74, 0.28), // 4: Top-Right (agak kanan atas)
+    ];
+
+    for i in scan_start..scan_end {
+        let w = &all_words[i];
+        let hash = word_hash(&w.text);
+
+        // ── 1. Dynamic 2D spatial area distribution ───────────────────────────
+        let (base_sx, base_sy) = SECTORS[i % 5];
+        // Organic pseudo-jitter within each sector (±13% X, ±11% Y)
+        let j_x = (((hash >> 13) % 1000) as f32 / 1000.0 * 2.0 - 1.0) * 0.13;
+        let j_y = (((hash >> 21) % 1000) as f32 / 1000.0 * 2.0 - 1.0) * 0.11;
+        let norm_x = (base_sx + j_x).clamp(0.12, 0.88);
+        let norm_y = (base_sy + j_y).clamp(0.12, 0.88);
+
+        // Safe coordinates within rect
+        let min_peak_y = rect.top() + hero_size * 0.75;
+        let max_peak_y = rect.bottom() - hero_size * 0.85;
+        let y_peak = (rect.top() + norm_y * rect.height()).clamp(min_peak_y, max_peak_y);
+
+        // Compute probe font & width for horizontal fitting & clamping
+        let mut cur_size = hero_size;
+        let probe_font = theme::lyric_font_for(&cfg.font, Weight::Bold, cur_size, &w.text);
+        let text_w = painter.layout_no_wrap(w.text.clone(), probe_font, Color32::WHITE).size().x;
+        let max_w = (rect.width() - 48.0).max(40.0);
+        if text_w > max_w {
+            cur_size = (cur_size * (max_w / text_w)).clamp(22.0, hero_size).round();
+        }
+        let font = theme::lyric_font_for(&cfg.font, Weight::Bold, cur_size, &w.text);
+
+        let min_x = rect.left() + text_w * 0.5 + 20.0;
+        let max_x = rect.right() - text_w * 0.5 - 20.0;
+        let target_x = rect.left() + norm_x * rect.width();
+        let x_peak = if max_x > min_x {
+            target_x.clamp(min_x, max_x)
+        } else {
+            center_x
+        };
+
+        // 2D Launch Origin: arcs naturally from bottom towards x_peak
+        let launch_drift_x = (x_peak - center_x) * 0.22;
+        let x_launch = x_peak - launch_drift_x;
+        let y_launch = rect.bottom() + hero_size + 40.0;
+
+        // ── 2. 3D Rotational momentum profiles (Roll, Yaw, Pitch) ────────────
+        let base_spin = ((hash >> 7) % 1000) as f32 / 1000.0 * 2.0 - 1.0;     // -1.0 to +1.0
+        let base_yaw = ((hash >> 15) % 1000) as f32 / 1000.0 * 2.0 - 1.0;    // -1.0 to +1.0
+        let base_pitch = ((hash >> 23) % 1000) as f32 / 1000.0 * 2.0 - 1.0;  // -1.0 to +1.0
+
+        // Roll (Z-axis tilt in screen plane)
+        let rot_launch_deg = base_spin * 14.0;                             // initial throw roll tilt (-14° to +14°)
+        let rot_rest_deg = base_spin * 4.0;                                // natural resting roll tilt in air (-4° to +4°)
+        let wobble_extra = (((hash >> 20) % 500) as f32 / 500.0 * 2.0 - 1.0) * 3.0;
+
+        // Yaw (Y-axis 3D rotation, viewing side extrusion walls)
+        let yaw_launch_deg = base_yaw * 16.0;                              // twist during launch (-16° to +16°)
+        let yaw_rest_deg = base_yaw * 6.0;                                 // slight natural angle in air (-6° to +6°)
+
+        // Pitch (X-axis 3D tilt, viewing top/bottom extrusion)
+        let pitch_launch_deg = -12.0 + base_pitch * 5.0;                   // thrown leaning slightly back (-17° to -7°)
+        let pitch_rest_deg = base_pitch * 3.0;                             // resting pitch (-3° to +3°)
+
+        let t_launch = w.start - ENTRY_DUR;
+        let t_apex = w.start;
+        let t_end = w.start + w.dur;
+
+        // ── 3. Calculate 3D physics trajectory (with weightless apex float) ──
+        let (x_pos, y_pos, roll_rad, yaw_rad, pitch_rad, glow_factor, is_hoverable) = if t < t_launch {
+            // Not yet thrown — deep below screen
+            continue;
+        } else if t < t_apex {
+            // ── PHASE 1: BALLISTIC THROW UPWARD (Deceleration into Weightlessness)
+            let p = ((t - t_launch) / ENTRY_DUR).clamp(0.0, 1.0) as f32;
+            // Physical ballistic curve: f(p) = 2p - p²
+            // Speed smoothly decelerates to zero at apex
+            let ballistic_p = 2.0 * p - p * p;
+            let y = y_launch + (y_peak - y_launch) * ballistic_p;
+            let x = x_launch + (x_peak - x_launch) * p;
+
+            // 3D Rotations develop with momentum and ease towards resting orientation
+            let rot_flight = rot_launch_deg * (1.0 - p) + rot_rest_deg * p + wobble_extra * (p * PI).sin() * (1.0 - p * 0.5);
+            let yaw_flight = yaw_launch_deg * (1.0 - p) + yaw_rest_deg * p;
+            let pitch_flight = pitch_launch_deg * (1.0 - p) + pitch_rest_deg * p;
+
+            let roll_rad = rot_flight * PI / 180.0;
+            let yaw_rad = yaw_flight * PI / 180.0;
+            let pitch_rad = pitch_flight * PI / 180.0;
+            let glow = p * p;
+            (x, y, roll_rad, yaw_rad, pitch_rad, glow, false)
+        } else if t < t_end {
+            // ── PHASE 2: WEIGHTLESS APEX FLOAT & DRIFT (Natural momentum subsiding)
+            let t_hold = (t - t_apex) as f32;
+            let settle_damp = (-t_hold * 3.5).exp();
+            // Gentle continuous microgravity breathing & subtle drift
+            let float_y = (t_hold * 1.8).sin() * 2.2;
+            let float_x = (t_hold * 1.4).sin() * 1.5;
+            let y = y_peak + (launch_drift_x * 0.04) * settle_damp + float_y;
+            let x = x_peak + float_x;
+
+            // Settle into natural 3D floating posture with subtle ambient swaying
+            let rot_settle = rot_rest_deg + wobble_extra * 0.35 * settle_damp * (t_hold * 6.0).sin();
+            let yaw_settle = yaw_rest_deg + (t_hold * 1.5).sin() * 1.5 * settle_damp;
+            let pitch_settle = pitch_rest_deg + (t_hold * 1.7).cos() * 1.2 * settle_damp;
+
+            let roll_rad = rot_settle * PI / 180.0;
+            let yaw_rad = yaw_settle * PI / 180.0;
+            let pitch_rad = pitch_settle * PI / 180.0;
+            (x, y, roll_rad, yaw_rad, pitch_rad, 1.0_f32, true)
+        } else {
+            // ── PHASE 3: FREE-FALL GRAVITATIONAL ACCELERATION ─────────────────
+            // Exactly when duration finishes, gravity smoothly plunges word downward
+            let t_exit = (t - t_end) as f32;
+            let y = y_peak + 0.5 * G_FALL * t_exit * t_exit;
+            let x = x_peak + (base_spin * 24.0 * t_exit);
+
+            // Aerodynamic drag: tips forward and yaws as it plunges downward
+            let fall_rot_deg = rot_rest_deg + base_spin * (t_exit * 20.0 + t_exit * t_exit * 18.0);
+            let fall_pitch_deg = pitch_rest_deg + t_exit * 32.0;
+            let fall_yaw_deg = yaw_rest_deg + base_yaw * (t_exit * 16.0);
+
+            let roll_rad = fall_rot_deg.clamp(-40.0, 40.0) * PI / 180.0;
+            let yaw_rad = fall_yaw_deg.clamp(-45.0, 45.0) * PI / 180.0;
+            let pitch_rad = fall_pitch_deg.clamp(-30.0, 50.0) * PI / 180.0;
+            let glow = (1.0 - t_exit * 3.2).max(0.0);
+            (x, y, roll_rad, yaw_rad, pitch_rad, glow, false)
+        };
+
+        // ── Strict clipping: skip if completely outside viewport ─────────────
+        if y_pos > rect.bottom() + hero_size + 40.0 || y_pos < rect.top() - hero_size - 40.0 {
+            continue;
+        }
+
+        active_items.push(ActiveItem {
+            text: w.text.clone(),
+            font,
+            cur_size,
+            hero_size,
+            pos: pos2(x_pos, y_pos),
+            roll_rad,
+            yaw_rad,
+            pitch_rad,
+            glow_factor,
+            word_idx: i,
+            is_hoverable,
+            start_time: w.start,
+        });
+    }
+
+    // ── 4. STABLE FORWARD LAYERING (Newest word strictly on top / foreground) ─
+    // Sort ascending by start_time so earlier words are background, newer words are foreground.
+    active_items.sort_by(|a, b| a.start_time.partial_cmp(&b.start_time).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Pass 1: Render glows of all active words (underneath all text)
+    for item in &active_items {
+        if item.glow_factor > 0.04 && !dev_off("glow") {
+            let glow_radius = (item.hero_size * 0.16).clamp(16.0, 28.0);
+            let hero_font = theme::lyric_font_for(&cfg.font, Weight::Bold, item.hero_size, &item.text);
+            if let Some((tex_id, content_rect, uv)) = glow.focal_word_glow(ctx, (f.key, 90000 + item.word_idx), &item.text, hero_font, glow_radius, atlas, ppp) {
+                let glow_base = if cfg.glow.a() > 20 {
+                    cfg.glow
+                } else if f.accent.a() > 20 {
+                    f.accent
+                } else {
+                    Color32::from_rgb(80, 200, 120)
+                };
+                let glow_col = theme::with_alpha(glow_base, 0.90 * item.glow_factor);
+                let scale = item.cur_size / item.hero_size;
+                let dest = Rect::from_center_size(item.pos, content_rect.size() * scale);
+                painter.image(tex_id, dest, uv, glow_col);
+            }
+        }
+    }
+
+    // Pass 2: Render 3D Volumetric Extruded texts in strict forward order (newest word drawn on top)
+    for item in &active_items {
+        let galley = ctx.fonts_mut(|fonts| fonts.layout_no_wrap(item.text.clone(), item.font.clone(), Color32::WHITE));
+        let half_size = galley.size() * 0.5;
+
+        struct LocalGlyph {
+            rect: Rect,
+            uv: Rect,
+        }
+        let mut glyphs = Vec::with_capacity(item.text.len());
+        for row in &galley.rows {
+            for gl in &row.row.glyphs {
+                let uv = gl.uv_rect;
+                if uv.is_nothing() {
+                    continue;
+                }
+                let min_p = row.pos.to_vec2() + gl.pos.to_vec2() + uv.offset - half_size;
+                let rect = Rect::from_min_size(pos2(min_p.x, min_p.y), uv.size);
+                let uvr = Rect::from_min_max(
+                    pos2(uv.min[0] as f32 / atlas[0] as f32, uv.min[1] as f32 / atlas[1] as f32),
+                    pos2(uv.max[0] as f32 / atlas[0] as f32, uv.max[1] as f32 / atlas[1] as f32),
+                );
+                glyphs.push(LocalGlyph { rect, uv: uvr });
+            }
+        }
+
+        if glyphs.is_empty() {
+            continue;
+        }
+
+        let (sin_y, cos_y) = item.yaw_rad.sin_cos();
+        let (sin_p, cos_p) = item.pitch_rad.sin_cos();
+        let (sin_r, cos_r) = item.roll_rad.sin_cos();
+        let focal_dist = 850.0_f32;
+
+        let project_3d = |rx: f32, ry: f32, rz: f32| -> Pos2 {
+            // 1. Yaw around Y axis
+            let x1 = rx * cos_y + rz * sin_y;
+            let y1 = ry;
+            let z1 = -rx * sin_y + rz * cos_y;
+
+            // 2. Pitch around X axis
+            let x2 = x1;
+            let y2 = y1 * cos_p - z1 * sin_p;
+            let z2 = y1 * sin_p + z1 * cos_p;
+
+            // 3. Roll around Z axis (in-plane tilt)
+            let x3 = x2 * cos_r - y2 * sin_r;
+            let y3 = x2 * sin_r + y2 * cos_r;
+            let z3 = z2;
+
+            // 4. Perspective projection
+            let scale = focal_dist / (focal_dist - z3).max(120.0);
+            pos2(item.pos.x + x3 * scale, item.pos.y + y3 * scale)
+        };
+
+        // Extrusion depth & slices
+        let thickness = (item.cur_size * 0.10).clamp(7.0, 15.0);
+        const SLICES: usize = 9;
+
+        // Directional light from top-left front (-0.35, -0.55, 0.75)
+        let light_dir_factor = ((-item.yaw_rad * 0.5 - item.pitch_rad * 0.6).sin() * 0.5 + 0.5).clamp(0.0, 1.0);
+
+        let has_vibrant_accent = f.accent.a() > 20 && (f.accent.r() > 30 || f.accent.g() > 30 || f.accent.b() > 30);
+        let accent_rgb = if has_vibrant_accent {
+            (f.accent.r() as f32, f.accent.g() as f32, f.accent.b() as f32)
+        } else {
+            (115.0, 135.0, 165.0)
+        };
+
+        let mut mesh = Mesh::with_texture(TextureId::default());
+
+        for k in 0..SLICES {
+            let t_slice = k as f32 / (SLICES - 1) as f32;
+            let z_k = -thickness * 0.5 + t_slice * thickness;
+
+            let is_front = k == SLICES - 1;
+            let slice_color = if is_front {
+                // Front face: pure crisp white
+                Color32::WHITE
+            } else {
+                // Body extrusion slice: depth gradient + directional light shading
+                let depth_ambient = 0.22 + 0.46 * t_slice;
+                let shade = (depth_ambient + 0.24 * light_dir_factor).clamp(0.18, 0.88);
+
+                let r = (24.0 + (accent_rgb.0 * 0.65 + 35.0) * shade).min(235.0).round() as u8;
+                let g = (26.0 + (accent_rgb.1 * 0.65 + 38.0) * shade).min(235.0).round() as u8;
+                let b = (32.0 + (accent_rgb.2 * 0.65 + 44.0) * shade).min(245.0).round() as u8;
+                Color32::from_rgba_unmultiplied(r, g, b, 255)
+            };
+
+            for gl in &glyphs {
+                let p0 = project_3d(gl.rect.left(), gl.rect.top(), z_k);
+                let p1 = project_3d(gl.rect.right(), gl.rect.top(), z_k);
+                let p2 = project_3d(gl.rect.right(), gl.rect.bottom(), z_k);
+                let p3 = project_3d(gl.rect.left(), gl.rect.bottom(), z_k);
+
+                let base = mesh.vertices.len() as u32;
+                mesh.vertices.push(Vertex { pos: p0, uv: gl.uv.left_top(), color: slice_color });
+                mesh.vertices.push(Vertex { pos: p1, uv: gl.uv.right_top(), color: slice_color });
+                mesh.vertices.push(Vertex { pos: p2, uv: gl.uv.right_bottom(), color: slice_color });
+                mesh.vertices.push(Vertex { pos: p3, uv: gl.uv.left_bottom(), color: slice_color });
+
+                mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
+
+        painter.add(Shape::mesh(mesh));
+
+        // Click-to-seek when hovering active word
+        if item.is_hoverable {
+            let hit_box = Rect::from_center_size(item.pos, vec2(rect.width() - 40.0, item.hero_size * 1.1));
+            if pointer.is_some_and(|p| hit_box.contains(p)) {
+                ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+                if clicked {
+                    seek = Some(item.start_time);
+                }
+            }
+        }
+    }
+
+    // ── Translation below focal area ─────────────────────────────────────────
+    let curr = &all_words[k];
+    if let Some(tr) = f.trans.get(curr.line_idx).copied().flatten() {
+        let tr_y = (rect.bottom() - 36.0).max(center_y + hero_size * 0.85);
+        let tr_font = theme::lyric_font_for(&cfg.font, Weight::Regular, 16.0, tr);
+        painter.text(pos2(center_x, tr_y), egui::Align2::CENTER_BOTTOM, tr, tr_font, theme::with_alpha(Color32::WHITE, 0.70));
+    }
+
+    // ── Native monitor refresh rate sync (120Hz/144Hz/VSync) ─────────────────
+    if f.playing {
+        ctx.request_repaint();
+    }
+
+    Out {
+        seek,
+        animating: f.playing,
+        user_scrolling: false,
+        ..Default::default()
+    }
+}
+
+// ------------------------------------------------------------------ code editor view
+
+fn paint_code_editor_view(
+    _glow: &mut Glow,
+    painter: &egui::Painter,
+    ctx: &egui::Context,
+    cfg: &Cfg,
+    f: &Frame,
+    layout: &Layout,
+    t: f64,
+    rect: Rect,
+    atlas: [usize; 2],
+    _ppp: f32,
+) -> Out {
+    use egui::epaint::Vertex;
+    use egui::TextureId;
+    use egui::Stroke;
+    use std::f32::consts::PI;
+
+    let mut seek = None;
+    let clicked = ctx.input(|i| i.pointer.primary_clicked());
+    let center = rect.center();
+
+    // Fill background (pitch black IDE canvas)
+    painter.rect_filled(rect, 0.0, Color32::from_rgb(9, 10, 13));
+
+    // Empty / instrumental placeholder
+    if layout.blocks.is_empty() {
+        let pulse = (f.now * 2.0).sin().abs() as f32;
+        painter.circle_filled(center, 24.0 + pulse * 8.0, Color32::from_rgba_unmultiplied(255, 51, 85, 40));
+        painter.circle_filled(center, 6.0, Color32::WHITE);
+        let label = "Instrumental";
+        let font = theme::lyric_font_for(&cfg.font, Weight::Semibold, 16.0, label);
+        painter.text(center + vec2(0.0, 32.0), egui::Align2::CENTER_TOP, label, font, theme::with_alpha(Color32::WHITE, 0.65));
+        return Out { seek: None, animating: true, user_scrolling: false, ..Default::default() };
+    }
+
+    // ── Configuration for Code Editor View ────────────────────────────────
+    struct CodeEditorConfig {
+        tab_bg: Color32,
+        tab_accent_top: Color32,
+        gutter_text_dim: Color32,
+        gutter_text_active: Color32,
+        active_line_band: Color32,
+        comment_color: Color32,
+        keyword_color: Color32,     // Purple #C678DD
+        method_color: Color32,      // Cyan/Blue #61AFEF
+        obj_color: Color32,         // Coral #E06C75
+        gold_color: Color32,        // Gold #E5C07B
+        number_color: Color32,      // Orange #D19A66
+        punct_color: Color32,       // Silver #ABB2BF
+        cursor_red: Color32,        // Bright red block cursor (#ff3355)
+        cursor_accent: Color32,     // Orange collaborator line cursor (#ff9900)
+        accent_color: Color32,      // Orange collaborator text & tag (#ff9900)
+        selection_blue: Color32,    // Blue word completion highlight (#264f78)
+        zoom_in_scale: f32,         // 1.85x
+        zoom_out_scale: f32,        // 0.95x
+        tilt_deg: f32,              // -2.8 deg
+    }
+
+    let conf = CodeEditorConfig {
+        tab_bg: Color32::from_rgb(14, 15, 19),
+        tab_accent_top: Color32::from_rgb(255, 51, 85),
+        gutter_text_dim: Color32::from_rgb(60, 68, 80),
+        gutter_text_active: Color32::from_rgb(220, 230, 245),
+        active_line_band: Color32::from_rgba_unmultiplied(255, 255, 255, 9),
+        comment_color: Color32::from_rgb(92, 103, 115),
+        keyword_color: Color32::from_rgb(198, 120, 221),
+        method_color: Color32::from_rgb(97, 175, 239),
+        obj_color: Color32::from_rgb(224, 108, 117),
+        gold_color: Color32::from_rgb(229, 192, 123),
+        number_color: Color32::from_rgb(209, 154, 102),
+        punct_color: Color32::from_rgb(171, 178, 191),
+        cursor_red: Color32::from_rgb(255, 51, 85),
+        cursor_accent: Color32::from_rgb(255, 153, 0),
+        accent_color: Color32::from_rgb(255, 153, 0),
+        selection_blue: Color32::from_rgba_unmultiplied(38, 79, 120, 210),
+        zoom_in_scale: 1.85,
+        zoom_out_scale: 0.95,
+        tilt_deg: -2.8,
+    };
+
+    let raw_title = f.title.unwrap_or("just us").trim();
+    let mut title_slug = String::new();
+    for ch in raw_title.chars() {
+        if ch.is_alphanumeric() {
+            title_slug.push(ch.to_ascii_lowercase());
+        } else if ch.is_whitespace() || ch == '-' {
+            if !title_slug.ends_with('_') && !title_slug.is_empty() {
+                title_slug.push('_');
+            }
+        }
+    }
+    if title_slug.is_empty() {
+        title_slug = "us".to_string();
+    }
+    let file_tab_name = format!("{}.js", title_slug);
+    let comment_text = format!("// {}", if raw_title.is_empty() { "just us" } else { raw_title });
+
+    struct EditorToken {
+        ident: String,
+        syntax_suffix: String,
+        is_object: bool,
+        is_accent: bool,
+        start: f64,
+        dur: f64,
+        char_offset: usize,
+    }
+
+    struct EditorLine {
+        line_num: usize,
+        line_idx: usize,
+        tokens: Vec<EditorToken>,
+        start: f64,
+        end: f64,
+    }
+
+    let mut editor_lines: Vec<EditorLine> = Vec::new();
+
+    for (li, b) in layout.blocks.iter().enumerate() {
+        if b.line.is_none() || b.instrumental {
+            continue;
+        }
+        let words: Vec<&Word> = b.words.iter().filter(|w| !w.text.trim().is_empty()).collect();
+        if words.is_empty() {
+            continue;
+        }
+
+        let m = words.len();
+        let mut tokens: Vec<EditorToken> = Vec::with_capacity(m);
+        let mut char_offset = 0usize;
+
+        for (j, w) in words.iter().enumerate() {
+            let raw_trimmed = w.text.trim();
+            let mut ident = String::new();
+            for ch in raw_trimmed.chars() {
+                if ch.is_alphanumeric() || ch == '_' || ch == '$' || !ch.is_ascii() {
+                    ident.push(ch.to_ascii_lowercase());
+                }
+            }
+            if ident.is_empty() {
+                ident = raw_trimmed.to_lowercase();
+            }
+
+            let is_object = (j % 2) == 0;
+            let is_last = j == m - 1;
+
+            let syntax_suffix = if !is_last {
+                if is_object { ".".to_string() } else { "(".to_string() }
+            } else {
+                if m % 2 == 1 {
+                    // Odd word count: last word is object (even index)
+                    // Close all opened parens (m / 2) plus semicolon
+                    let close_count = m / 2;
+                    let mut s = ")".repeat(close_count);
+                    s.push(';');
+                    s
+                } else {
+                    // Even word count: last word is method (odd index)
+                    // Empty call '()' plus remaining open parens ((m - 2) / 2) plus semicolon
+                    let close_count = (m - 2) / 2;
+                    let mut s = "()".to_string();
+                    s.push_str(&")".repeat(close_count));
+                    s.push(';');
+                    s
+                }
+            };
+
+            let is_accent = w.bg
+                || raw_trimmed.starts_with('(')
+                || raw_trimmed.ends_with(')')
+                || ident == "you"
+                || ident == "me";
+
+            let token_chars = ident.chars().count() + syntax_suffix.chars().count();
+            tokens.push(EditorToken {
+                ident,
+                syntax_suffix,
+                is_object,
+                is_accent,
+                start: w.start,
+                dur: w.dur.max(0.08),
+                char_offset,
+            });
+            char_offset += token_chars;
+        }
+
+        let start = tokens.first().map(|tok| tok.start).unwrap_or(b.start);
+        let end = tokens.last().map(|tok| tok.start + tok.dur).unwrap_or(start + 0.3);
+        let line_num = editor_lines.len() + 3; // line 1: comment, line 2: blank, line 3+: lyrics
+
+        editor_lines.push(EditorLine {
+            line_num,
+            line_idx: li,
+            tokens,
+            start,
+            end,
+        });
+    }
+
+    if editor_lines.is_empty() {
+        return Out { seek: None, animating: f.playing, user_scrolling: false, ..Default::default() };
+    }
+
+    // Base monospace typography scale in editor world coordinates
+    let base_font_size = 28.0_f32;
+    let base_font = FontId::monospace(base_font_size);
+    let sample_galley = ctx.fonts_mut(|fonts| fonts.layout_no_wrap("M".to_string(), base_font.clone(), Color32::WHITE));
+    let char_w = sample_galley.size().x;
+    let line_h = base_font_size * 2.15;
+
+    // Find active line and transition state
+    let mut active_line_idx = 0usize;
+    let mut in_line_trans = false;
+    let mut trans_q = 0.0_f32;
+    let num_lines = editor_lines.len();
+
+    if t < editor_lines[0].start {
+        // Pre-song lead-in
+        active_line_idx = 0;
+    } else if t > editor_lines[num_lines - 1].end {
+        // Post-song
+        active_line_idx = num_lines - 1;
+    } else {
+        for (idx, line) in editor_lines.iter().enumerate() {
+            if t >= line.start && t <= line.end {
+                active_line_idx = idx;
+                in_line_trans = false;
+                break;
+            } else if idx + 1 < num_lines && t > line.end && t < editor_lines[idx + 1].start {
+                active_line_idx = idx;
+                in_line_trans = true;
+                let gap = (editor_lines[idx + 1].start - line.end).max(0.10);
+                trans_q = ((t - line.end) / gap).clamp(0.0, 1.0) as f32;
+                break;
+            } else if t >= line.start {
+                active_line_idx = idx;
+            }
+        }
+    }
+
+    let curr_line = &editor_lines[active_line_idx];
+    let next_line = if active_line_idx + 1 < num_lines {
+        &editor_lines[active_line_idx + 1]
+    } else {
+        curr_line
+    };
+
+    let curr_line_y = (curr_line.line_num - 1) as f32 * line_h;
+    let next_line_y = (next_line.line_num - 1) as f32 * line_h;
+
+    let mut cursor_char_idx = 0usize;
+    let mut cursor_subpixel_x = 0.0_f32;
+    let mut cursor_is_accent = false;
+    let mut active_token_progress = 0.0_f32;
+    let mut active_token_is_active = false;
+
+    for tok in &curr_line.tokens {
+        let total_tok_chars = tok.ident.chars().count() + tok.syntax_suffix.chars().count();
+        if t >= tok.start + tok.dur {
+            // Token is already fully typed
+            cursor_char_idx = tok.char_offset + total_tok_chars;
+            cursor_subpixel_x = cursor_char_idx as f32 * char_w;
+        } else if t >= tok.start {
+            // Token is currently being typed
+            active_token_is_active = true;
+            cursor_is_accent = tok.is_accent;
+            let p = ((t - tok.start) / tok.dur).clamp(0.0, 1.0) as f32;
+            active_token_progress = p;
+            let typed = ((p * total_tok_chars as f32).floor() as usize).min(total_tok_chars);
+            cursor_char_idx = tok.char_offset + typed;
+
+            // Continuous sub-pixel x position (fluid, no 16px stair-stepping!)
+            let continuous_chars = tok.char_offset as f32 + (p * total_tok_chars as f32);
+            cursor_subpixel_x = continuous_chars * char_w;
+            break;
+        } else {
+            // Not yet typed
+            break;
+        }
+    }
+
+    let cursor_world_x = cursor_char_idx as f32 * char_w;
+
+    // ── Dynamic Zoom Varieties ───────────────────────────────────────────────
+    let base_zoom = conf.zoom_in_scale;
+
+    // 1. Word Punch-In Impact:
+    // When a word starts being typed (p in [0.0, 0.38]), camera gives a snappy punch-in (+0.32x)
+    let word_punch = if active_token_is_active && active_token_progress < 0.38 {
+        let punch_p = active_token_progress / 0.38;
+        (1.0 - punch_p).powf(2.0) * 0.32
+    } else {
+        0.0
+    };
+
+    // 2. Cadence Breathing:
+    // Between words or during vocal lulls, camera pulls back subtly (-0.14x)
+    let breathing = if active_token_is_active && active_token_progress > 0.75 {
+        ((active_token_progress - 0.75) / 0.25) * 0.14
+    } else if !active_token_is_active && !in_line_trans {
+        0.16
+    } else {
+        0.0
+    };
+
+    let (target_cam_x, target_cam_y, target_zoom, _whoosh_intensity) = if in_line_trans {
+        // Fast snappy zoom-out whoosh between lines
+        let smooth_q = trans_q * trans_q * (3.0 - 2.0 * trans_q); // Hermite smoothstep
+        let cx = egui::lerp(cursor_subpixel_x..=0.0, smooth_q);
+        let cy = egui::lerp(curr_line_y..=next_line_y, smooth_q);
+        let dip = (trans_q * PI).sin();
+        let z = egui::lerp(base_zoom..=conf.zoom_out_scale, dip);
+        (cx, cy, z, dip)
+    } else {
+        let current_target_zoom = (base_zoom + word_punch - breathing).clamp(1.40, 2.30);
+        (cursor_subpixel_x, curr_line_y, current_target_zoom, 0.0_f32)
+    };
+
+    // ── Camera Momentum and Spring/Exponential Smoothing ─────────────────────
+    #[derive(Clone, Copy)]
+    struct CodeCamState {
+        x: f32,
+        y: f32,
+        zoom: f32,
+        last_t: f64,
+    }
+
+    let cam_id = egui::Id::unique("code-editor-smooth-cam");
+    let mut cam = ctx.data(|d| d.get_temp::<CodeCamState>(cam_id)).unwrap_or(CodeCamState {
+        x: target_cam_x,
+        y: target_cam_y,
+        zoom: target_zoom,
+        last_t: f.now,
+    });
+
+    let dt = (f.now - cam.last_t).clamp(0.001, 0.05) as f32;
+    cam.last_t = f.now;
+
+    // Detect hard seek or sudden jump:
+    if (target_cam_x - cam.x).abs() > 700.0 || (target_cam_y - cam.y).abs() > 350.0 {
+        cam.x = target_cam_x;
+        cam.y = target_cam_y;
+        cam.zoom = target_zoom;
+    } else {
+        // Smooth exponential damping (buttery smooth glides!)
+        let lambda_x = if in_line_trans { 14.0 } else { 11.0 };
+        let lambda_y = 12.0;
+        let lambda_z = 9.0;
+        cam.x += (target_cam_x - cam.x) * (1.0 - (-lambda_x * dt).exp());
+        cam.y += (target_cam_y - cam.y) * (1.0 - (-lambda_y * dt).exp());
+        cam.zoom += (target_zoom - cam.zoom) * (1.0 - (-lambda_z * dt).exp());
+    }
+
+    ctx.data_mut(|d| d.insert_temp(cam_id, cam));
+
+    let cam_x = cam.x;
+    let cam_y = cam.y;
+    let cam_zoom = cam.zoom;
+
+    let tilt_rad = conf.tilt_deg * PI / 180.0;
+    let (sin_t, cos_t) = tilt_rad.sin_cos();
+
+    // Center focal point on screen (slightly below header)
+    let screen_focus = pos2(rect.center().x - 60.0, rect.center().y + 16.0);
+
+    let to_screen = |wx: f32, wy: f32| -> Pos2 {
+        let rel_x = (wx - cam_x) * cam_zoom;
+        let rel_y = (wy - cam_y) * cam_zoom;
+        let tx = rel_x * cos_t - rel_y * sin_t;
+        let ty = rel_x * sin_t + rel_y * cos_t;
+        pos2(screen_focus.x + tx, screen_focus.y + ty)
+    };
+
+    // Active line band (subtle horizontal strip across line)
+    if !in_line_trans {
+        let band_wy0 = curr_line_y - line_h * 0.18;
+        let band_wy1 = curr_line_y + line_h * 0.82;
+        let p0 = to_screen(-180.0, band_wy0);
+        let p1 = to_screen(2400.0, band_wy0);
+        let p2 = to_screen(2400.0, band_wy1);
+        let p3 = to_screen(-180.0, band_wy1);
+        painter.add(Shape::convex_polygon(vec![p0, p1, p2, p3], conf.active_line_band, Stroke::NONE));
+    }
+
+    let atlas_w = (atlas[0] as f32).max(1.0);
+    let atlas_h = (atlas[1] as f32).max(1.0);
+    let mut text_mesh = Mesh::with_texture(TextureId::default());
+
+    let draw_galley_to_mesh = |g: &Galley, world_x: f32, world_y: f32, color: Color32, mesh: &mut Mesh| {
+        for row in &g.rows {
+            for gl in &row.row.glyphs {
+                let uv = gl.uv_rect;
+                if uv.is_nothing() {
+                    continue;
+                }
+                let offset = row.pos.to_vec2() + gl.pos.to_vec2() + uv.offset;
+                let wx0 = world_x + offset.x;
+                let wy0 = world_y + offset.y;
+                let wx1 = wx0 + uv.size.x;
+                let wy1 = wy0 + uv.size.y;
+
+                let p0 = to_screen(wx0, wy0);
+                let p1 = to_screen(wx1, wy0);
+                let p2 = to_screen(wx1, wy1);
+                let p3 = to_screen(wx0, wy1);
+
+                let uvr = Rect::from_min_max(
+                    pos2(uv.min[0] as f32 / atlas_w, uv.min[1] as f32 / atlas_h),
+                    pos2(uv.max[0] as f32 / atlas_w, uv.max[1] as f32 / atlas_h),
+                );
+
+                let base = mesh.vertices.len() as u32;
+                mesh.vertices.push(Vertex { pos: p0, uv: uvr.left_top(), color });
+                mesh.vertices.push(Vertex { pos: p1, uv: uvr.right_top(), color });
+                mesh.vertices.push(Vertex { pos: p2, uv: uvr.right_bottom(), color });
+                mesh.vertices.push(Vertex { pos: p3, uv: uvr.left_bottom(), color });
+                mesh.indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+            }
+        }
+    };
+
+    // ── Render Line 1 (Comment: // just us) ──────────────────────────────────
+    let line1_y = 0.0_f32;
+    let line1_num_galley = ctx.fonts_mut(|fonts| fonts.layout_no_wrap("1".to_string(), base_font.clone(), conf.gutter_text_dim));
+    let line1_text_galley = ctx.fonts_mut(|fonts| fonts.layout_no_wrap(comment_text.clone(), base_font.clone(), conf.comment_color));
+    draw_galley_to_mesh(&line1_num_galley, -18.0 - line1_num_galley.size().x, line1_y, conf.gutter_text_dim, &mut text_mesh);
+    draw_galley_to_mesh(&line1_text_galley, 0.0, line1_y, conf.comment_color, &mut text_mesh);
+
+    let token_color = |tok: &EditorToken| -> Color32 {
+        if tok.is_accent {
+            conf.accent_color
+        } else if matches!(tok.ident.as_str(), "if" | "else" | "const" | "let" | "var" | "function" | "fn" | "return" | "async" | "await" | "try" | "catch" | "throw" | "new" | "import" | "export") {
+            conf.keyword_color
+        } else if tok.ident.chars().all(|c| c.is_ascii_digit()) {
+            conf.number_color
+        } else if tok.is_object {
+            if (tok.char_offset / 5) % 2 == 0 { conf.obj_color } else { conf.gold_color }
+        } else {
+            conf.method_color
+        }
+    };
+
+    // ── Render Lyric Lines ───────────────────────────────────────────────────
+    for line in &editor_lines {
+        let line_y = (line.line_num - 1) as f32 * line_h;
+
+        // Skip lines that are far above or below screen
+        let test_screen_y = to_screen(0.0, line_y).y;
+        if test_screen_y < rect.top() - 100.0 || test_screen_y > rect.bottom() + 100.0 {
+            continue;
+        }
+
+        // Gutter line number
+        let is_active_line = !in_line_trans && line.line_num == curr_line.line_num;
+        let num_color = if is_active_line { conf.gutter_text_active } else { conf.gutter_text_dim };
+        let num_str = format!("{}", line.line_num);
+        let num_galley = ctx.fonts_mut(|fonts| fonts.layout_no_wrap(num_str, base_font.clone(), num_color));
+        draw_galley_to_mesh(&num_galley, -18.0 - num_galley.size().x, line_y, num_color, &mut text_mesh);
+
+        // Tokens
+        for tok in &line.tokens {
+            let is_completed = t >= tok.start + tok.dur;
+            let is_active = t >= tok.start && t < tok.start + tok.dur;
+
+            if is_completed {
+                // Blue selection flash right after typing completes
+                let elapsed_done = (t - (tok.start + tok.dur)) as f32;
+                if elapsed_done >= 0.0 && elapsed_done < 0.38 {
+                    let sel_fade = (1.0 - elapsed_done / 0.38).powf(1.6);
+                    let sel_col = theme::with_alpha(conf.selection_blue, sel_fade);
+                    let sel_x0 = tok.char_offset as f32 * char_w - 2.0;
+                    let sel_x1 = (tok.char_offset + tok.ident.chars().count()) as f32 * char_w + 2.0;
+                    let sel_y0 = line_y - line_h * 0.10;
+                    let sel_y1 = line_y + line_h * 0.85;
+                    let q0 = to_screen(sel_x0, sel_y0);
+                    let q1 = to_screen(sel_x1, sel_y0);
+                    let q2 = to_screen(sel_x1, sel_y1);
+                    let q3 = to_screen(sel_x0, sel_y1);
+                    painter.add(Shape::convex_polygon(vec![q0, q1, q2, q3], sel_col, Stroke::NONE));
+                }
+
+                // Render full ident
+                let ident_col = token_color(tok);
+                let ident_galley = ctx.fonts_mut(|fonts| fonts.layout_no_wrap(tok.ident.clone(), base_font.clone(), ident_col));
+                draw_galley_to_mesh(&ident_galley, tok.char_offset as f32 * char_w, line_y, ident_col, &mut text_mesh);
+
+                // Render syntax suffix
+                let suffix_x = (tok.char_offset + tok.ident.chars().count()) as f32 * char_w;
+                let suffix_galley = ctx.fonts_mut(|fonts| fonts.layout_no_wrap(tok.syntax_suffix.clone(), base_font.clone(), conf.punct_color));
+                draw_galley_to_mesh(&suffix_galley, suffix_x, line_y, conf.punct_color, &mut text_mesh);
+            } else if is_active {
+                let p = ((t - tok.start) / tok.dur).clamp(0.0, 1.0) as f32;
+                let total_tok_chars = tok.ident.chars().count() + tok.syntax_suffix.chars().count();
+                let typed = ((p * total_tok_chars as f32).floor() as usize).min(total_tok_chars);
+                let ident_len = tok.ident.chars().count();
+
+                if typed <= ident_len {
+                    let sub_ident: String = tok.ident.chars().take(typed).collect();
+                    if !sub_ident.is_empty() {
+                        let ident_col = token_color(tok);
+                        let ident_galley = ctx.fonts_mut(|fonts| fonts.layout_no_wrap(sub_ident, base_font.clone(), ident_col));
+                        draw_galley_to_mesh(&ident_galley, tok.char_offset as f32 * char_w, line_y, ident_col, &mut text_mesh);
+                    }
+                } else {
+                    // Full ident
+                    let ident_col = token_color(tok);
+                    let ident_galley = ctx.fonts_mut(|fonts| fonts.layout_no_wrap(tok.ident.clone(), base_font.clone(), ident_col));
+                    draw_galley_to_mesh(&ident_galley, tok.char_offset as f32 * char_w, line_y, ident_col, &mut text_mesh);
+
+                    // Substring suffix
+                    let sub_suffix: String = tok.syntax_suffix.chars().take(typed - ident_len).collect();
+                    if !sub_suffix.is_empty() {
+                        let suffix_x = (tok.char_offset + ident_len) as f32 * char_w;
+                        let suffix_galley = ctx.fonts_mut(|fonts| fonts.layout_no_wrap(sub_suffix, base_font.clone(), conf.punct_color));
+                        draw_galley_to_mesh(&suffix_galley, suffix_x, line_y, conf.punct_color, &mut text_mesh);
+                    }
+                }
+            }
+        }
+    }
+
+    // Submit all code text in a single GPU mesh draw call
+    painter.add(Shape::mesh(text_mesh));
+
+    // ── Render Caret / Cursor ────────────────────────────────────────────────
+    if !in_line_trans {
+        if cursor_is_accent {
+            // Collaborator Orange Cursor line
+            let cur_w = 2.5 / cam_zoom;
+            let c0 = to_screen(cursor_world_x, curr_line_y - line_h * 0.12);
+            let c1 = to_screen(cursor_world_x + cur_w, curr_line_y - line_h * 0.12);
+            let c2 = to_screen(cursor_world_x + cur_w, curr_line_y + line_h * 0.88);
+            let c3 = to_screen(cursor_world_x, curr_line_y + line_h * 0.88);
+            painter.add(Shape::convex_polygon(vec![c0, c1, c2, c3], conf.cursor_accent, Stroke::NONE));
+
+            // Small yellow/orange flag badge "you" above cursor
+            let badge_pos = to_screen(cursor_world_x - 4.0, curr_line_y - line_h * 0.45);
+            let badge_font = theme::lyric_font_for(&cfg.font, Weight::Bold, 11.0, "you");
+            let badge_galley = ctx.fonts_mut(|fonts| fonts.layout_no_wrap("you".to_string(), badge_font, Color32::from_rgb(20, 20, 20)));
+            let badge_rect = Rect::from_min_size(badge_pos, badge_galley.size() + vec2(10.0, 4.0));
+            painter.rect_filled(badge_rect, 3.0, Color32::from_rgb(255, 175, 40));
+            painter.galley(badge_pos + vec2(5.0, 2.0), badge_galley, Color32::from_rgb(20, 20, 20));
+        } else {
+            // Standard Thick Red Block Cursor
+            let cur_w = char_w * 0.92;
+            let c0 = to_screen(cursor_world_x, curr_line_y - line_h * 0.08);
+            let c1 = to_screen(cursor_world_x + cur_w, curr_line_y - line_h * 0.08);
+            let c2 = to_screen(cursor_world_x + cur_w, curr_line_y + line_h * 0.85);
+            let c3 = to_screen(cursor_world_x, curr_line_y + line_h * 0.85);
+            painter.add(Shape::convex_polygon(vec![c0, c1, c2, c3], conf.cursor_red, Stroke::NONE));
+        }
+    }
+
+    // ── Pulsing Collaborator Ring under accent token ─────────────────────────
+    for line in &editor_lines {
+        let line_y = (line.line_num - 1) as f32 * line_h;
+        for tok in &line.tokens {
+            if tok.is_accent && t >= tok.start - 0.40 && t <= tok.start + tok.dur + 0.30 {
+                let pulse = (f.now * 4.0).sin().abs() as f32;
+                let r_base = 18.0 + pulse * 5.0;
+                let ring_center_w = pos2((tok.char_offset + tok.ident.chars().count() / 2) as f32 * char_w, line_y + line_h * 0.60);
+                let ring_screen = to_screen(ring_center_w.x, ring_center_w.y);
+                painter.circle(ring_screen, r_base * cam_zoom, Color32::from_rgba_unmultiplied(255, 153, 0, 30), Stroke::new(2.0, conf.accent_color));
+
+                // Pin pole & flag "you"
+                let pole_top = to_screen(ring_center_w.x, ring_center_w.y - 20.0);
+                painter.line_segment([ring_screen, pole_top], Stroke::new(2.0, conf.accent_color));
+                let flag_rect = Rect::from_min_size(pole_top + vec2(2.0, -12.0), vec2(28.0 * cam_zoom, 14.0 * cam_zoom));
+                painter.rect_filled(flag_rect, 2.0, Color32::from_rgb(255, 175, 40));
+                let flag_font = theme::lyric_font_for(&cfg.font, Weight::Bold, 9.5, "you");
+                painter.text(flag_rect.center(), egui::Align2::CENTER_CENTER, "you", flag_font, Color32::from_rgb(20, 20, 20));
+            }
+        }
+    }
+
+    // ── Fixed Top Editor Tab Bar ─────────────────────────────────────────────
+    let tab_bar_rect = Rect::from_min_size(rect.left_top(), vec2(rect.width(), 38.0));
+    painter.rect_filled(tab_bar_rect, 0.0, conf.tab_bg);
+
+    // ── Back Button (Return to previous lyric animation mode) ─────────────────
+    let back_btn_rect = Rect::from_min_size(rect.left_top(), vec2(48.0, 38.0));
+    let pointer_hover = ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
+    let is_back_hover = pointer_hover.is_some_and(|p| back_btn_rect.contains(p));
+    let mut return_to_prev_mode = false;
+    if is_back_hover {
+        painter.rect_filled(back_btn_rect, 0.0, Color32::from_rgb(34, 38, 50));
+        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        if clicked {
+            return_to_prev_mode = true;
+        }
+    }
+    let back_col = if is_back_hover { Color32::WHITE } else { Color32::from_rgb(160, 172, 190) };
+    let back_font = theme::lyric_font_for(&cfg.font, Weight::Bold, 17.0, "←");
+    painter.text(back_btn_rect.center(), egui::Align2::CENTER_CENTER, "←", back_font, back_col);
+
+    // Divider after back button
+    painter.line_segment(
+        [rect.left_top() + vec2(48.0, 6.0), rect.left_top() + vec2(48.0, 32.0)],
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 18)),
+    );
+
+    // Active Tab button (starts right after back button)
+    let tab_start_x = rect.left() + 49.0;
+    let tab_w = 145.0_f32;
+    let tab_rect = Rect::from_min_size(pos2(tab_start_x, rect.top()), vec2(tab_w, 38.0));
+    painter.rect_filled(tab_rect, 0.0, Color32::from_rgb(18, 20, 26));
+
+    // Red thin stripe at the very top of the active tab
+    painter.rect_filled(Rect::from_min_size(pos2(tab_start_x, rect.top()), vec2(tab_w, 2.0)), 0.0, conf.tab_accent_top);
+
+    // JS file icon (amber square)
+    let icon_rect = Rect::from_center_size(pos2(tab_start_x + 18.0, rect.top() + 20.0), vec2(14.0, 14.0));
+    painter.rect_filled(icon_rect, 2.0, Color32::from_rgb(247, 183, 49));
+    let js_font = theme::lyric_font_for(&cfg.font, Weight::Bold, 8.5, "JS");
+    painter.text(icon_rect.center(), egui::Align2::CENTER_CENTER, "JS", js_font, Color32::from_rgb(25, 20, 10));
+
+    // File tab name
+    let tab_font = theme::lyric_font_for(&cfg.font, Weight::Regular, 13.0, &file_tab_name);
+    painter.text(pos2(tab_start_x + 31.0, rect.top() + 19.0), egui::Align2::LEFT_CENTER, &file_tab_name, tab_font, Color32::from_rgb(220, 226, 235));
+
+    // Close 'x' button
+    let close_font = theme::lyric_font_for(&cfg.font, Weight::Regular, 12.0, "×");
+    painter.text(pos2(tab_start_x + tab_w - 14.0, rect.top() + 19.0), egui::Align2::CENTER_CENTER, "×", close_font, Color32::from_rgb(120, 130, 145));
+
+    // Red dot badge "1 here" (Live Share indicator)
+    let badge_dot_pos = pos2(tab_start_x + tab_w + 20.0, rect.top() + 19.0);
+    painter.circle_filled(badge_dot_pos, 4.0, Color32::from_rgb(255, 51, 85));
+    let here_font = theme::lyric_font_for(&cfg.font, Weight::Regular, 12.0, "1 here");
+    painter.text(badge_dot_pos + vec2(10.0, 0.0), egui::Align2::LEFT_CENTER, "1 here", here_font, Color32::from_rgb(190, 198, 210));
+
+    // Bottom border line of tab bar
+    painter.line_segment(
+        [rect.left_top() + vec2(0.0, 38.0), rect.right_top() + vec2(0.0, 38.0)],
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 16)),
+    );
+
+    // ── Breadcrumbs bar below tab bar ────────────────────────────────────────
+    let breadcrumb_rect = Rect::from_min_size(pos2(rect.left(), rect.top() + 38.0), vec2(rect.width(), 22.0));
+    painter.rect_filled(breadcrumb_rect, 0.0, Color32::from_rgb(18, 20, 26));
+    let bc_font = theme::lyric_font_for(&cfg.font, Weight::Regular, 11.0, "src > lyrics");
+    let bc_text = format!("src  ›  tracks  ›  {}  ›  #line_{}", file_tab_name, curr_line.line_num);
+    painter.text(pos2(rect.left() + 20.0, rect.top() + 49.0), egui::Align2::LEFT_CENTER, bc_text, bc_font, Color32::from_rgb(130, 140, 155));
+    painter.line_segment(
+        [pos2(rect.left(), rect.top() + 60.0), pos2(rect.right(), rect.top() + 60.0)],
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 12)),
+    );
+
+    // ── Minimap on the right edge ────────────────────────────────────────────
+    let minimap_w = 42.0_f32;
+    let minimap_rect = Rect::from_min_size(pos2(rect.right() - minimap_w, rect.top() + 60.0), vec2(minimap_w, rect.height() - 84.0));
+    painter.rect_filled(minimap_rect, 0.0, Color32::from_rgba_unmultiplied(12, 14, 18, 140));
+    painter.line_segment([minimap_rect.left_top(), minimap_rect.left_bottom()], Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 10)));
+    let num_lines = editor_lines.len().max(1);
+    let line_mini_h = (minimap_rect.height() / (num_lines as f32 * 1.4)).clamp(2.0, 5.0);
+    for (i, l) in editor_lines.iter().enumerate() {
+        let my = minimap_rect.top() + 8.0 + i as f32 * (line_mini_h + 2.0);
+        if my > minimap_rect.bottom() - 8.0 { break; }
+        let is_cur = l.line_num == curr_line.line_num;
+        let bar_w = (l.tokens.len() as f32 * 4.0).clamp(6.0, minimap_w - 10.0);
+        let bar_col = if is_cur { Color32::from_rgb(255, 51, 85) } else { Color32::from_rgba_unmultiplied(255, 255, 255, 35) };
+        painter.rect_filled(Rect::from_min_size(pos2(minimap_rect.left() + 5.0, my), vec2(bar_w, line_mini_h)), 1.0, bar_col);
+    }
+
+    // ── Status bar at bottom ─────────────────────────────────────────────────
+    let status_rect = Rect::from_min_size(pos2(rect.left(), rect.bottom() - 22.0), vec2(rect.width(), 22.0));
+    painter.rect_filled(status_rect, 0.0, Color32::from_rgb(14, 15, 19));
+    let st_font = theme::lyric_font_for(&cfg.font, Weight::Regular, 11.0, "sample");
+    let st_left = format!("Ln {}, Col {}  |  Spaces: 2  |  UTF-8  |  TypeScript", curr_line.line_num, curr_line.tokens.len() * 4);
+    painter.text(pos2(rect.left() + 16.0, rect.bottom() - 11.0), egui::Align2::LEFT_CENTER, st_left, st_font.clone(), Color32::from_rgb(140, 150, 165));
+    let st_right = "git: main*  |  BitChord Live";
+    painter.text(pos2(rect.right() - minimap_w - 16.0, rect.bottom() - 11.0), egui::Align2::RIGHT_CENTER, st_right, st_font, Color32::from_rgb(110, 120, 135));
+
+    // ── Translation below code area ──────────────────────────────────────────
+    if let Some(tr) = f.trans.get(curr_line.line_idx).copied().flatten() {
+        let tr_y = rect.bottom() - 32.0;
+        let tr_font = theme::lyric_font_for(&cfg.font, Weight::Regular, 15.0, tr);
+        painter.text(pos2(rect.center().x, tr_y), egui::Align2::CENTER_BOTTOM, tr, tr_font, theme::with_alpha(Color32::WHITE, 0.65));
+    }
+
+    // Click-to-seek: ONLY within code lines, NEVER on back button or tab bar!
+    if clicked && !is_back_hover && pointer_hover.is_some_and(|p| p.y > rect.top() + 42.0) {
+        let p_screen = pointer_hover.unwrap();
+        let curr_y_screen = to_screen(0.0, curr_line_y).y;
+        if (p_screen.y - curr_y_screen).abs() < line_h * cam_zoom * 0.8 {
+            seek = Some(curr_line.start);
+        }
+    }
+
+    // Double safety: if returning to previous mode, NEVER seek!
+    if return_to_prev_mode {
+        seek = None;
+    }
+
+    if f.playing {
+        ctx.request_repaint();
+    }
+
+    Out {
+        seek,
+        animating: f.playing,
+        user_scrolling: false,
+        return_to_prev_mode,
+        ..Default::default()
+    }
+}
+
+// ------------------------------------------------------------------ chat lyrics
+
+#[allow(clippy::too_many_arguments)]
+fn paint_chat_view(
+    painter: &egui::Painter,
+    ctx: &egui::Context,
+    cfg: &Cfg,
+    f: &Frame,
+    layout: &Layout,
+    t: f64,
+    rect: Rect,
+    _atlas: [usize; 2],
+    _ppp: f32,
+) -> Out {
+    use egui::{Stroke, StrokeKind};
+
+    let pointer = ctx.input(|i| i.pointer.hover_pos()).filter(|p| rect.contains(*p));
+    let clicked = ctx.input(|i| i.pointer.primary_clicked());
+    let now = f.now;
+
+    let mut return_to_prev_mode = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+    let mut toggle_play = false;
+    let mut next_track = false;
+    let mut prev_track = false;
+    let mut seek = None;
+
+    // 1. Dark Backdrop
+    painter.rect_filled(rect, 0.0, Color32::from_rgb(7, 9, 13));
+
+    // 2. Extract Lines and Words
+    struct ChatWord {
+        text: String,
+        start: f64,
+        dur: f64,
+    }
+
+    struct ChatLine {
+        words: Vec<ChatWord>,
+        start: f64,
+        end: f64,
+        trans: Option<String>,
+        full_text: String,
+    }
+
+    let mut chat_lines: Vec<ChatLine> = Vec::new();
+    for (li, b) in layout.blocks.iter().enumerate() {
+        if b.line.is_none() || b.instrumental {
+            continue;
+        }
+        let words: Vec<&Word> = b.words.iter().filter(|w| !w.text.trim().is_empty()).collect();
+        if words.is_empty() {
+            continue;
+        }
+        let start = words.first().map(|w| w.start).unwrap_or(0.0);
+        let end = words.last().map(|w| w.start + w.dur.max(0.3)).unwrap_or(start + 2.0);
+        let mut c_words = Vec::new();
+
+        let is_line_synced = words.iter().all(|w| w.dur <= 0.0);
+        let line_dur = (end - start).max(1.0);
+        let total_chars: usize = words.iter().map(|w| w.text.trim().chars().count()).sum();
+        let mut char_acc = 0usize;
+
+        for w in words {
+            let text = w.text.trim().to_string();
+            let (w_start, w_dur) = if is_line_synced {
+                let n = text.chars().count();
+                let s = start + if total_chars > 0 { line_dur * (char_acc as f64) / (total_chars as f64) } else { 0.0 };
+                let d = if total_chars > 0 { line_dur * (n as f64) / (total_chars as f64) } else { 0.2 };
+                char_acc += n;
+                (s, d)
+            } else {
+                (w.start, w.dur.max(0.12))
+            };
+            c_words.push(ChatWord { text, start: w_start, dur: w_dur });
+        }
+
+        let full_text = c_words.iter().map(|w| w.text.as_str()).collect::<Vec<_>>().join(" ");
+        let trans = f.trans.get(li).copied().flatten().map(|s| s.to_string());
+        chat_lines.push(ChatLine {
+            words: c_words,
+            start,
+            end,
+            trans,
+            full_text,
+        });
+    }
+
+    let num_lines = chat_lines.len();
+
+    // Determine current active line index
+    let mut active_line_idx: Option<usize> = None;
+    for (i, l) in chat_lines.iter().enumerate() {
+        if t >= l.start && t <= l.end {
+            active_line_idx = Some(i);
+            break;
+        } else if t < l.start {
+            if i > 0 {
+                active_line_idx = Some(i - 1);
+            }
+            break;
+        }
+    }
+    if active_line_idx.is_none() && num_lines > 0 && t >= chat_lines[num_lines - 1].end {
+        active_line_idx = Some(num_lines - 1);
+    }
+
+    // Check if receiver typing indicator is active for upcoming odd line (Receiver)
+    let next_line_idx = active_line_idx.map_or(0, |i| i + 1);
+    let is_receiver_typing = if next_line_idx < num_lines && (next_line_idx % 2 == 1) {
+        let next_start = chat_lines[next_line_idx].start;
+        let prev_end = active_line_idx.map_or(0.0, |i| chat_lines[i].end);
+        let lead_in_start = (next_start - 2.0).max(prev_end);
+        t >= lead_in_start && t < next_start
+    } else {
+        false
+    };
+
+    // Scaled-up layout metrics
+    let col_w = (rect.width() * 0.58).clamp(620.0, 940.0).min(rect.width() - 80.0);
+    let col_left = rect.center().x - col_w * 0.5;
+    let col_right = rect.center().x + col_w * 0.5;
+
+    let font_chat = theme::lyric_font_for(&cfg.font, Weight::Semibold, 27.0, "sample");
+    let font_name = theme::lyric_font_for(&cfg.font, Weight::Regular, 14.5, "sample");
+    let font_avatar = theme::lyric_font_for(&cfg.font, Weight::Bold, 18.0, "A");
+
+    let pad_x = 26.0_f32;
+    let pad_y = 18.0_f32;
+    let avatar_size = 46.0_f32;
+    let avatar_margin = 14.0_f32;
+    let receiver_offset_x = avatar_size + avatar_margin;
+    let max_bubble_w = col_w * 0.78;
+    let max_text_w = max_bubble_w - pad_x * 2.0;
+
+    let raw_artist = f.artist.unwrap_or("Artist");
+    let artist_parts: Vec<&str> = raw_artist.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+
+    // 3. Measure & Position All Lines Chronologically (Top-to-Bottom)
+    struct ComputedBubble {
+        line_idx: usize,
+        is_sender: bool,
+        bubble_rect: Rect,
+        galley: std::sync::Arc<egui::Galley>,
+        contact_name: String,
+        avatar_pos: Pos2,
+        name_pos: Pos2,
+        trans_pos: Option<Pos2>,
+        trans_text: Option<String>,
+        is_typing_only: bool,
+    }
+
+    let max_visible_line = if is_receiver_typing { next_line_idx } else { active_line_idx.unwrap_or(0) };
+    let mut computed_items: Vec<ComputedBubble> = Vec::new();
+
+    let mut current_world_y = rect.top() + 75.0; // Start comfortably below header
+    let normal_gap = 14.0_f32;
+    let speaker_switch_gap = 26.0_f32;
+
+    for i in 0..=max_visible_line {
+        if i >= num_lines {
+            break;
+        }
+        let line = &chat_lines[i];
+        let is_sender = i % 2 == 0;
+        let is_typing_only = i == next_line_idx && is_receiver_typing;
+
+        if i > 0 {
+            let prev_sender = (i - 1) % 2 == 0;
+            if is_sender != prev_sender {
+                current_world_y += speaker_switch_gap;
+            } else {
+                current_world_y += normal_gap;
+            }
+        }
+
+        let contact_name = if !is_sender {
+            let part_idx = (i / 2) % artist_parts.len().max(1);
+            artist_parts.get(part_idx).copied().unwrap_or(raw_artist).to_string()
+        } else {
+            String::new()
+        };
+
+        let name_h = if !is_sender { 20.0_f32 } else { 0.0_f32 };
+        let name_pos = pos2(col_left + receiver_offset_x + 6.0, current_world_y + 2.0);
+        let bubble_y = current_world_y + name_h;
+
+        if is_typing_only {
+            let ind_w = 82.0_f32;
+            let ind_h = 50.0_f32;
+            let bubble_rect = Rect::from_min_size(pos2(col_left + receiver_offset_x + 6.0, bubble_y), vec2(ind_w, ind_h));
+            let avatar_pos = pos2(col_left + avatar_size * 0.5, bubble_rect.bottom() - avatar_size * 0.5);
+
+            let dummy_galley = ctx.fonts_mut(|fonts| fonts.layout_no_wrap(String::new(), font_chat.clone(), Color32::WHITE));
+            computed_items.push(ComputedBubble {
+                line_idx: i,
+                is_sender: false,
+                bubble_rect,
+                galley: dummy_galley,
+                contact_name,
+                avatar_pos,
+                name_pos,
+                trans_pos: None,
+                trans_text: None,
+                is_typing_only: true,
+            });
+            current_world_y = bubble_rect.bottom();
+        } else {
+            let galley = ctx.fonts_mut(|fonts| fonts.layout(line.full_text.clone(), font_chat.clone(), Color32::WHITE, max_text_w));
+            let g_size = galley.size();
+
+            let bubble_w = (g_size.x + pad_x * 2.0).clamp(60.0, max_bubble_w);
+            let bubble_h = g_size.y + pad_y * 2.0;
+
+            let bubble_x = if is_sender {
+                col_right - 6.0 - bubble_w
+            } else {
+                col_left + receiver_offset_x + 6.0
+            };
+
+            let bubble_rect = Rect::from_min_size(pos2(bubble_x, bubble_y), vec2(bubble_w, bubble_h));
+            let avatar_pos = pos2(col_left + avatar_size * 0.5, bubble_rect.bottom() - avatar_size * 0.5);
+
+            let (trans_pos, trans_text) = if let Some(tr) = line.trans.as_ref() {
+                let tr_pos = if is_sender {
+                    pos2(bubble_rect.right(), bubble_rect.bottom() + 6.0)
+                } else {
+                    pos2(bubble_rect.left(), bubble_rect.bottom() + 6.0)
+                };
+                (Some(tr_pos), Some(tr.clone()))
+            } else {
+                (None, None)
+            };
+
+            let extra_trans_h = if trans_text.is_some() { 24.0 } else { 0.0 };
+
+            computed_items.push(ComputedBubble {
+                line_idx: i,
+                is_sender,
+                bubble_rect,
+                galley,
+                contact_name,
+                avatar_pos,
+                name_pos,
+                trans_pos,
+                trans_text,
+                is_typing_only: false,
+            });
+
+            current_world_y = bubble_rect.bottom() + extra_trans_h;
+        }
+    }
+
+    // 4. Downward Camera Tracking
+    let target_bottom_screen = rect.bottom() - 130.0;
+    let latest_bottom = computed_items.last().map(|it| it.bubble_rect.bottom()).unwrap_or(rect.top() + 100.0);
+    let target_cam_scroll = (latest_bottom - target_bottom_screen).max(0.0);
+
+    let cam_scroll = ctx.animate_value_with_time(egui::Id::unique("chat_cam_scroll_y"), target_cam_scroll, 0.45 * theme::SPEED);
+
+    // 5. Render Bubbles
+    let top_fade_start = rect.top() + 180.0;
+    let top_fade_end = rect.top() + 80.0;
+
+    for item in &computed_items {
+        let screen_bubble_rect = item.bubble_rect.translate(vec2(0.0, -cam_scroll));
+
+        if screen_bubble_rect.bottom() < top_fade_end || screen_bubble_rect.top() > rect.bottom() {
+            continue;
+        }
+
+        let alpha_fade = if screen_bubble_rect.top() < top_fade_start {
+            ((screen_bubble_rect.top() - top_fade_end) / (top_fade_start - top_fade_end)).clamp(0.0, 1.0)
+        } else {
+            1.0_f32
+        };
+
+        if item.is_typing_only {
+            // Receiver 3-Dot Typing Indicator
+            let bubble_bg = theme::with_alpha(Color32::from_rgb(38, 37, 42), alpha_fade);
+            let rounding = egui::CornerRadius { nw: 22, ne: 22, sw: 6, se: 22 };
+            painter.rect_filled(screen_bubble_rect, rounding, bubble_bg);
+            painter.rect_stroke(screen_bubble_rect, rounding, Stroke::new(1.0, theme::with_alpha(Color32::from_white_alpha(15), alpha_fade)), StrokeKind::Inside);
+
+            let bx0 = screen_bubble_rect.left();
+            let by1 = screen_bubble_rect.bottom();
+            let p1 = pos2(bx0 + 3.0, by1);
+            let p2 = pos2(bx0 - 5.0, by1 + 1.2);
+            let p3 = pos2(bx0, by1 - 8.0);
+            painter.add(Shape::convex_polygon(vec![p1, p2, p3], bubble_bg, egui::Stroke::NONE));
+
+            let dot_cy = screen_bubble_rect.center().y;
+            let dot_cx = screen_bubble_rect.center().x;
+            for di in 0..3 {
+                let offset_x = (di as f32 - 1.0) * 12.0;
+                let bounce = (-(now * 5.5 + di as f64 * 0.75).sin().max(0.0) * 4.5) as f32;
+                let dot_pos = pos2(dot_cx + offset_x, dot_cy + bounce);
+                painter.circle_filled(dot_pos, 3.8, theme::with_alpha(Color32::from_rgb(142, 142, 147), alpha_fade));
+            }
+
+            let screen_av_pos = item.avatar_pos - vec2(0.0, cam_scroll);
+            let av_bg = theme::with_alpha(Color32::from_rgb(175, 82, 222), alpha_fade);
+            painter.circle_filled(screen_av_pos, avatar_size * 0.5, av_bg);
+            let initial = item.contact_name.chars().next().unwrap_or('?').to_string();
+            painter.text(screen_av_pos, egui::Align2::CENTER_CENTER, initial, font_avatar.clone(), theme::with_alpha(Color32::WHITE, alpha_fade));
+
+            let screen_name_pos = item.name_pos - vec2(0.0, cam_scroll);
+            painter.text(screen_name_pos, egui::Align2::LEFT_CENTER, &item.contact_name, font_name.clone(), theme::with_alpha(Color32::from_rgb(142, 142, 147), alpha_fade));
+            continue;
+        }
+
+        let is_active = Some(item.line_idx) == active_line_idx;
+        let line = &chat_lines[item.line_idx];
+
+        if item.is_sender {
+            // SENDER BUBBLE (Apple Blue, Right-aligned, Live Typewriter without horizontal shifting)
+            let bubble_bg = theme::with_alpha(Color32::from_rgb(11, 132, 254), alpha_fade);
+            let rounding = egui::CornerRadius { nw: 22, ne: 22, sw: 22, se: 6 };
+            painter.rect_filled(screen_bubble_rect, rounding, bubble_bg);
+
+            let bx1 = screen_bubble_rect.right();
+            let by1 = screen_bubble_rect.bottom();
+            let p1 = pos2(bx1 - 3.0, by1);
+            let p2 = pos2(bx1 + 5.0, by1 + 1.2);
+            let p3 = pos2(bx1, by1 - 8.0);
+            painter.add(Shape::convex_polygon(vec![p1, p2, p3], bubble_bg, egui::Stroke::NONE));
+
+            let text_pos = pos2(screen_bubble_rect.left() + pad_x, screen_bubble_rect.top() + pad_y);
+
+            if is_active {
+                let mut revealed_text = String::new();
+                let mut is_typing_now = false;
+                for w in &line.words {
+                    if t >= w.start {
+                        if !revealed_text.is_empty() {
+                            revealed_text.push(' ');
+                        }
+                        if t <= w.start + w.dur {
+                            let q = ((t - w.start) / w.dur.max(0.05)).clamp(0.0, 1.0) as f32;
+                            let char_count = (w.text.chars().count() as f32 * q).ceil() as usize;
+                            revealed_text.push_str(&w.text.chars().take(char_count).collect::<String>());
+                            is_typing_now = true;
+                            break;
+                        } else {
+                            revealed_text.push_str(&w.text);
+                        }
+                    }
+                }
+
+                let cur_galley = ctx.fonts_mut(|fonts| fonts.layout(revealed_text, font_chat.clone(), Color32::WHITE, max_text_w));
+                let cur_size = cur_galley.size();
+                painter.galley(text_pos, cur_galley, theme::with_alpha(Color32::WHITE, alpha_fade));
+
+                if is_typing_now && (now * 5.0).sin() > -0.2 {
+                    let cursor_x = text_pos.x + cur_size.x + 2.0;
+                    let cursor_y = text_pos.y + cur_size.y * 0.5;
+                    painter.rect_filled(
+                        Rect::from_center_size(pos2(cursor_x, cursor_y), vec2(2.5, font_chat.size * 0.9)),
+                        1.0,
+                        theme::with_alpha(Color32::WHITE, alpha_fade * 0.9),
+                    );
+                }
+            } else {
+                painter.galley(text_pos, item.galley.clone(), theme::with_alpha(Color32::WHITE, alpha_fade));
+            }
+        } else {
+            // RECEIVER BUBBLE (Dark Mode #26252A, White text, Avatar & Contact Name)
+            let bubble_bg = theme::with_alpha(Color32::from_rgb(38, 37, 42), alpha_fade);
+            let rounding = egui::CornerRadius { nw: 22, ne: 22, sw: 6, se: 22 };
+            painter.rect_filled(screen_bubble_rect, rounding, bubble_bg);
+            painter.rect_stroke(screen_bubble_rect, rounding, Stroke::new(1.0, theme::with_alpha(Color32::from_white_alpha(15), alpha_fade)), StrokeKind::Inside);
+
+            let bx0 = screen_bubble_rect.left();
+            let by1 = screen_bubble_rect.bottom();
+            let p1 = pos2(bx0 + 3.0, by1);
+            let p2 = pos2(bx0 - 5.0, by1 + 1.2);
+            let p3 = pos2(bx0, by1 - 8.0);
+            painter.add(Shape::convex_polygon(vec![p1, p2, p3], bubble_bg, egui::Stroke::NONE));
+
+            let screen_av_pos = item.avatar_pos - vec2(0.0, cam_scroll);
+            let av_colors = [
+                Color32::from_rgb(255, 100, 130), // Pink/Coral
+                Color32::from_rgb(48, 176, 199),  // Teal
+                Color32::from_rgb(175, 82, 222),  // Purple
+                Color32::from_rgb(52, 199, 89),   // Green
+            ];
+            let av_bg = theme::with_alpha(av_colors[(item.line_idx / 2) % av_colors.len()], alpha_fade);
+            painter.circle_filled(screen_av_pos, avatar_size * 0.5, av_bg);
+            let initial = item.contact_name.chars().next().unwrap_or('?').to_string();
+            painter.text(screen_av_pos, egui::Align2::CENTER_CENTER, initial, font_avatar.clone(), theme::with_alpha(Color32::WHITE, alpha_fade));
+
+            let screen_name_pos = item.name_pos - vec2(0.0, cam_scroll);
+            painter.text(screen_name_pos, egui::Align2::LEFT_CENTER, &item.contact_name, font_name.clone(), theme::with_alpha(Color32::from_rgb(142, 142, 147), alpha_fade));
+
+            let text_pos = pos2(screen_bubble_rect.left() + pad_x, screen_bubble_rect.top() + pad_y);
+            painter.galley(text_pos, item.galley.clone(), theme::with_alpha(Color32::from_rgb(242, 242, 247), alpha_fade));
+        }
+
+        let is_hover = pointer.is_some_and(|p| screen_bubble_rect.contains(p));
+        if is_hover && !is_active {
+            ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+            if clicked {
+                seek = Some(line.start);
+            }
+        }
+
+        if is_active && let (Some(tr_pos), Some(tr)) = (item.trans_pos, item.trans_text.as_ref()) {
+            let tr_screen_pos = tr_pos - vec2(0.0, cam_scroll);
+            let tr_font = theme::lyric_font_for(&cfg.font, Weight::Regular, 14.5, tr);
+            let align = if item.is_sender { egui::Align2::RIGHT_TOP } else { egui::Align2::LEFT_TOP };
+            painter.text(tr_screen_pos, align, tr, tr_font, theme::with_alpha(Color32::WHITE, 0.70 * alpha_fade));
+        }
+    }
+
+    // 6. Title Card (Morphs from Hero Card to Compact Top Pill)
+    let is_hero = active_line_idx.map_or(true, |idx| idx == 0);
+    let morph = theme::anim_bool(ctx, "chat_title_morph", !is_hero, 0.35);
+
+    let raw_title = f.title.unwrap_or("Unknown Title");
+
+    if morph < 0.99 {
+        let hero_alpha = 1.0 - morph;
+        let hero_w = (col_w * 0.92).clamp(420.0, 580.0);
+        let hero_h = 80.0_f32;
+        let hero_y = rect.top() + 68.0 - morph * 30.0;
+        let hero_rect = Rect::from_center_size(pos2(rect.center().x, hero_y), vec2(hero_w, hero_h));
+
+        let card_bg = theme::with_alpha(Color32::from_black_alpha(200), hero_alpha);
+        let card_stroke = theme::with_alpha(Color32::from_white_alpha(30), hero_alpha);
+        painter.rect_filled(hero_rect, 20.0, card_bg);
+        painter.rect_stroke(hero_rect, 20.0, Stroke::new(1.0, card_stroke), StrokeKind::Inside);
+
+        let thumb_rect = Rect::from_min_size(hero_rect.left_top() + vec2(14.0, 14.0), vec2(52.0, 52.0));
+        let mut drew_thumb = false;
+        if let Some(thumb) = f.thumbs.first() {
+            if let Ok(egui::load::TexturePoll::Ready { texture }) = egui::Image::new(&thumb.url).load_for_size(ctx, thumb_rect.size()) {
+                let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+                let mut mesh = egui::Mesh::with_texture(texture.id);
+                mesh.add_rect_with_uv(thumb_rect, uv, theme::with_alpha(Color32::WHITE, hero_alpha));
+                painter.add(Shape::mesh(mesh));
+                drew_thumb = true;
+            }
+        }
+        if !drew_thumb {
+            painter.rect_filled(thumb_rect, 10.0, theme::with_alpha(Color32::from_rgb(28, 32, 42), hero_alpha));
+            painter.text(thumb_rect.center(), egui::Align2::CENTER_CENTER, "🎵", egui::FontId::proportional(24.0), theme::with_alpha(Color32::WHITE, hero_alpha));
+        }
+
+        let text_x = hero_rect.left() + 78.0;
+        let title_font = theme::lyric_font_for(&cfg.font, Weight::Bold, 17.5, raw_title);
+        let artist_font = theme::lyric_font_for(&cfg.font, Weight::Regular, 14.0, raw_artist);
+
+        painter.text(pos2(text_x, hero_rect.top() + 26.0), egui::Align2::LEFT_CENTER, raw_title, title_font, theme::with_alpha(Color32::WHITE, hero_alpha));
+        painter.text(pos2(text_x, hero_rect.top() + 52.0), egui::Align2::LEFT_CENTER, raw_artist, artist_font, theme::with_alpha(Color32::from_white_alpha(170), hero_alpha));
+    }
+
+    if morph > 0.01 {
+        let pill_alpha = morph;
+        let pill_h = 34.0_f32;
+        let pill_font = theme::lyric_font_for(&cfg.font, Weight::Regular, 13.5, "sample");
+        let pill_text = format!("{raw_title} · {raw_artist}");
+        let pill_g = ctx.fonts_mut(|fonts| fonts.layout_no_wrap(pill_text.clone(), pill_font.clone(), Color32::WHITE));
+        let pill_w = (pill_g.size().x + 32.0).clamp(180.0, col_w);
+        let pill_y = rect.top() + 28.0;
+        let pill_rect = Rect::from_center_size(pos2(rect.center().x, pill_y), vec2(pill_w, pill_h));
+
+        painter.rect_filled(pill_rect, 17.0, theme::with_alpha(Color32::from_black_alpha(190), pill_alpha));
+        painter.rect_stroke(pill_rect, 17.0, Stroke::new(1.0, theme::with_alpha(Color32::from_white_alpha(26), pill_alpha)), StrokeKind::Inside);
+        painter.text(pill_rect.center(), egui::Align2::CENTER_CENTER, pill_text, pill_font, theme::with_alpha(Color32::from_white_alpha(210), pill_alpha));
+    }
+
+    // 7. Top-Left Back Button (44x44px accessible touch target)
+    let back_btn_rect = Rect::from_min_size(rect.left_top() + vec2(24.0, 22.0), vec2(44.0, 44.0));
+    let is_back_hover = pointer.is_some_and(|p| back_btn_rect.contains(p));
+    let back_h = theme::anim_bool(ctx, "chat_back_h", is_back_hover, 0.15);
+    let back_bg = Color32::from_white_alpha((18.0 + back_h * 24.0) as u8);
+    painter.rect_filled(back_btn_rect, 22.0, back_bg);
+    painter.rect_stroke(back_btn_rect, 22.0, Stroke::new(1.0, Color32::from_white_alpha((28.0 + back_h * 30.0) as u8)), StrokeKind::Inside);
+
+    let back_font = theme::lyric_font_for(&cfg.font, Weight::Bold, 18.0, "←");
+    let back_col = theme::lerp_color(Color32::from_white_alpha(190), Color32::WHITE, back_h);
+    painter.text(back_btn_rect.center(), egui::Align2::CENTER_CENTER, "←", back_font, back_col);
+
+    if is_back_hover {
+        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        if clicked {
+            return_to_prev_mode = true;
+        }
+    }
+
+    // 8. Bottom Playback Controls Floating Glass Pill (190x44px)
+    let ctrl_w = 190.0_f32;
+    let ctrl_h = 44.0_f32;
+    let ctrl_rect = Rect::from_center_size(pos2(rect.center().x, rect.bottom() - 44.0), vec2(ctrl_w, ctrl_h));
+    painter.rect_filled(ctrl_rect, 22.0, Color32::from_black_alpha(210));
+    painter.rect_stroke(ctrl_rect, 22.0, Stroke::new(1.0, Color32::from_white_alpha(32)), StrokeKind::Inside);
+
+    let prev_rect = Rect::from_center_size(pos2(ctrl_rect.center().x - 52.0, ctrl_rect.center().y), Vec2::splat(32.0));
+    let play_rect = Rect::from_center_size(ctrl_rect.center(), Vec2::splat(34.0));
+    let next_rect = Rect::from_center_size(pos2(ctrl_rect.center().x + 52.0, ctrl_rect.center().y), Vec2::splat(32.0));
+
+    if pointer.is_some_and(|p| prev_rect.contains(p)) {
+        painter.circle_filled(prev_rect.center(), 16.0, Color32::from_white_alpha(28));
+        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        if clicked {
+            prev_track = true;
+        }
+    }
+    painter.text(prev_rect.center(), egui::Align2::CENTER_CENTER, "⏮", egui::FontId::proportional(16.0), Color32::WHITE);
+
+    if pointer.is_some_and(|p| play_rect.contains(p)) {
+        painter.circle_filled(play_rect.center(), 17.0, Color32::from_white_alpha(38));
+        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        if clicked {
+            toggle_play = true;
+        }
+    }
+    let play_sym = if f.playing { "❚❚" } else { "▶" };
+    painter.text(play_rect.center(), egui::Align2::CENTER_CENTER, play_sym, egui::FontId::proportional(16.0), Color32::WHITE);
+
+    if pointer.is_some_and(|p| next_rect.contains(p)) {
+        painter.circle_filled(next_rect.center(), 16.0, Color32::from_white_alpha(28));
+        ctx.set_cursor_icon(egui::CursorIcon::PointingHand);
+        if clicked {
+            next_track = true;
+        }
+    }
+    painter.text(next_rect.center(), egui::Align2::CENTER_CENTER, "⏭", egui::FontId::proportional(16.0), Color32::WHITE);
+
+    if return_to_prev_mode {
+        seek = None;
+    }
+
+    if f.playing {
+        ctx.request_repaint();
+    }
+
+    Out {
+        seek,
+        animating: f.playing,
+        user_scrolling: false,
+        return_to_prev_mode,
+        toggle_play,
+        next_track,
+        prev_track,
+    }
+}
+
 // ------------------------------------------------------------------ glow
 
 /// A word's drop-shadow to rasterize once this frame's glyphs are known.
@@ -2028,6 +4329,72 @@ impl Glow {
         let (img, content_rect) = rasterize_glow(&atlas, &job, ppp * scale, &mut self.scratch)?;
         let old = self.lines.remove(&key).map(|(s, ..)| s);
         let slot = self.upload(ctx, old, img, "lyric-blur");
+        let out = (slot.tex.id(), content_rect, slot.uv());
+        self.lines.insert(key, (slot, step, content_rect, now));
+        Some(out)
+    }
+
+    fn focal_word_glow(
+        &mut self,
+        ctx: &egui::Context,
+        key: (u64, usize),
+        text: &str,
+        font: FontId,
+        radius: f32,
+        atlas_size: [usize; 2],
+        ppp: f32,
+    ) -> Option<(TextureId, Rect, Rect)> {
+        if dev_off("glow") {
+            return None;
+        }
+        let now = ctx.input(|i| i.time);
+        let step: LineStep = ((radius * 4.0) as i32, (font.size * 10.0) as i32, hash(text));
+        if let Some((s, r, rect, used)) = self.lines.get_mut(&key)
+            && *r == step
+        {
+            *used = now;
+            return Some((s.tex.id(), *rect, s.uv()));
+        }
+
+        let g = ctx.fonts_mut(|fv| fv.layout_no_wrap(text.to_string(), font.clone(), Color32::WHITE));
+        let uv_of = |min: [u16; 2], max: [u16; 2]| {
+            Rect::from_min_max(
+                pos2(min[0] as f32 / atlas_size[0] as f32, min[1] as f32 / atlas_size[1] as f32),
+                pos2(max[0] as f32 / atlas_size[0] as f32, max[1] as f32 / atlas_size[1] as f32),
+            )
+        };
+        let mut quads = Vec::new();
+        for row in &g.rows {
+            for gl in &row.row.glyphs {
+                let uv = gl.uv_rect;
+                if uv.is_nothing() {
+                    continue;
+                }
+                let r = Rect::from_min_size(Pos2::ZERO + row.pos.to_vec2() + gl.pos.to_vec2() + uv.offset, uv.size);
+                quads.push((r, uv_of(uv.min, uv.max), 0, 1, 1.0));
+            }
+        }
+        if quads.is_empty() {
+            return None;
+        }
+        let uvs: Vec<Rect> = quads.iter().map(|q| q.1).collect();
+        let atlas = self.atlas(ctx, atlas_size, &uvs);
+        let bounds = quads.iter().fold(Rect::NOTHING, |a, q| a.union(q.0));
+        let job = GlowJob {
+            key: (0, 0, 0, 0),
+            quads,
+            word: bounds,
+            look: WordLook { opacity: 1.0, start: 2.0, end: 3.0, glow: radius, glow_alpha: 0.95 },
+            by_letter: false,
+            rtl: false,
+            radius,
+            pills: Vec::new(),
+            color: Color32::WHITE,
+            layer: ShapeIdx(0),
+        };
+        let (img, content_rect) = rasterize_glow(&atlas, &job, ppp, &mut self.scratch)?;
+        let old = self.lines.remove(&key).map(|(s, ..)| s);
+        let slot = self.upload(ctx, old, img, "focal-glow");
         let out = (slot.tex.id(), content_rect, slot.uv());
         self.lines.insert(key, (slot, step, content_rect, now));
         Some(out)

@@ -240,6 +240,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     nav(ui, glyphs::EXPLORE, APPLE, "New", Page::New, p == Page::New, &mut go_to);
     nav(ui, glyphs::LIBRARY, APPLE, "Library", Page::Library(LibTab::Playlists), matches!(p, Page::Library(_)), &mut go_to);
     nav(ui, glyphs::DOWNLOAD, APPLE, "Downloads", Page::Downloads, p == Page::Downloads, &mut go_to);
+    nav(ui, glyphs::SPARKLES, APPLE, "Import Playlist", Page::Transfer, p == Page::Transfer, &mut go_to);
 
     ui.add_space(14.0);
     let (line, _) = ui.allocate_exact_size(vec2(ui.available_width(), 1.0), Sense::hover());
@@ -273,11 +274,11 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 ui.label(egui::RichText::new("Sign in to see your playlists").color(theme::text_dim()));
                 ui.add_space(8.0);
                 if widgets::pill(ui, "Sign in", None, false).clicked() {
-                    app.start_sign_in(ui.ctx());
+                    app.actions.push(Action::Go(Page::Onboarding));
                 }
             } else {
                 ui.multiply_opacity(2.0 * t - 1.0);
-                nav(ui, glyphs::PERSON_CIRCLE, LUCIDE, "Sign in", Page::Settings, false, &mut go_to);
+                nav(ui, glyphs::PERSON_CIRCLE, LUCIDE, "Sign in", Page::Onboarding, false, &mut go_to);
             }
             return;
         }
@@ -422,6 +423,39 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     }
 }
 
+// ------------------------------------------------------------------ mobile bottom bar
+
+pub fn mobile_nav(app: &mut App, ui: &mut Ui) {
+    let p = app.page.clone();
+    let mut go_to: Option<Page> = None;
+    let avail_w = ui.available_width();
+    let item_w = avail_w / 4.0;
+
+    let mut nav_item = |ui: &mut Ui, glyph: &'static [u8], label: &str, page: Page, selected: bool, go_to: &mut Option<Page>| {
+        let (rect, resp) = ui.allocate_exact_size(vec2(item_w, 52.0), Sense::click());
+        let resp = named(resp, label).on_hover_cursor(egui::CursorIcon::PointingHand);
+        let icon_fg = if selected { app.accent_color() } else { theme::text_dim() };
+        glyphs::draw(ui, pos2(rect.center().x, rect.top() + 16.0), glyphs::APPLE_GLYPH, glyph, icon_fg);
+        let font = if selected { theme::semibold(11.0) } else { theme::regular(11.0) };
+        ui.painter().text(pos2(rect.center().x, rect.bottom() - 6.0), Align2::CENTER_BOTTOM, label, font, icon_fg);
+        if resp.clicked() {
+            *go_to = Some(page);
+        }
+    };
+
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+        nav_item(ui, glyphs::HOME, "Home", Page::Home, p == Page::Home, &mut go_to);
+        nav_item(ui, glyphs::EXPLORE, "Explore", Page::New, p == Page::New, &mut go_to);
+        nav_item(ui, glyphs::SEARCH, "Search", Page::Search(String::new()), matches!(p, Page::Search(_)), &mut go_to);
+        nav_item(ui, glyphs::LIBRARY, "Library", Page::Library(LibTab::Playlists), matches!(p, Page::Library(_)), &mut go_to);
+    });
+
+    if let Some(target) = go_to {
+        app.actions.push(Action::Go(target));
+    }
+}
+
 // ------------------------------------------------------------------ top bar
 
 pub fn top_bar(app: &mut App, ui: &mut Ui) {
@@ -450,7 +484,11 @@ pub fn top_bar(app: &mut App, ui: &mut Ui) {
         icon_at(ui, r.center(), icon::USER, 18.0, theme::text_dim());
     }
     if resp.clicked() {
-        app.actions.push(Action::Go(Page::Settings));
+        if app.logged_in {
+            app.actions.push(Action::Go(Page::Settings));
+        } else {
+            app.actions.push(Action::Go(Page::Onboarding));
+        }
     }
     if app.loading {
         let spin = Rect::from_min_size(pos2(r.left() - 34.0, r.top() + 8.0), Vec2::splat(20.0));
@@ -556,9 +594,33 @@ pub fn search_field(app: &mut App, ui: &mut Ui, width: f32) {
         let q = picked.unwrap_or_else(|| app.search_text.trim().to_owned());
         if !q.is_empty() {
             app.suggestions = Default::default();
-            app.actions.push(Action::Go(Page::Search(q)));
+            if q.contains("music.apple.com") || q.contains("deezer.com") || q.contains("open.spotify.com") || q.contains("spotify:playlist:") {
+                app.xfer.link = q;
+                app.actions.push(Action::Go(Page::Transfer));
+            } else if let Some(id) = extract_playlist_id(&q) {
+                app.actions.push(Action::Open(crate::model::Target::Playlist(id)));
+            } else {
+                app.actions.push(Action::Go(Page::Search(q)));
+            }
         }
     }
+}
+
+fn extract_playlist_id(text: &str) -> Option<String> {
+    if let Some(pos) = text.find("list=") {
+        let after = &text[pos + 5..];
+        let id: String = after.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+    let trimmed = text.trim();
+    if (trimmed.starts_with("PL") || trimmed.starts_with("OLAK5uy_") || trimmed.starts_with("RDCLAK5uy_")) && trimmed.len() > 10 {
+        if trimmed.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+            return Some(trimmed.to_owned());
+        }
+    }
+    None
 }
 
 /// Search suggestions dropdown under the search box.
@@ -1158,6 +1220,142 @@ pub fn toast(app: &mut App, ctx: &egui::Context, now: f64) {
     if (0.25..4.1).contains(&age) {
         ctx.request_repaint_after(std::time::Duration::from_secs_f32(4.1 - age));
     } else {
+        ctx.request_repaint();
+    }
+}
+
+// ------------------------------------------------------------------ update notification (from Danialgobel)
+
+pub fn update_notification(app: &mut App, ctx: &egui::Context, now: f64) {
+    if app.update_dismissed {
+        return;
+    }
+    let version = app.updater.as_ref().and_then(|u| match u.state() {
+        crate::update::State::Ready { version, .. } => Some(version.clone()),
+        _ => None,
+    });
+    let Some(version) = version else { return };
+
+    if app.update_notif_shown.is_none() {
+        app.update_notif_shown = Some(now);
+    }
+    let shown = app.update_notif_shown.unwrap_or(now);
+    let age = (now - shown) as f32;
+    let t = (age / 0.55).min(1.0);
+    // Smooth cubic ease-out
+    let spring = 1.0 - (1.0 - t).powi(3);
+    let y_offset = 24.0 * (1.0 - spring);
+
+    let screen = ctx.content_rect();
+    let is_id = std::env::var("LANG").unwrap_or_default().to_lowercase().starts_with("id");
+    let title = if is_id { "Update terbaru dari Danialgobel" } else { "New update from Danialgobel" };
+    let sub = if is_id { format!("BitChord v{version} siap dipasang") } else { format!("BitChord v{version} is ready to install") };
+    let btn_label = if is_id { "Mulai Ulang" } else { "Restart" };
+
+    let mut do_restart = false;
+    let mut do_dismiss = false;
+
+    egui::Area::new(egui::Id::unique("update_banner_danialgobel"))
+        .order(egui::Order::Tooltip)
+        .pivot(Align2::CENTER_TOP)
+        .fixed_pos(pos2(screen.center().x, screen.top() + 14.0 + y_offset))
+        .show(ctx, |ui| {
+            ui.set_opacity(spring);
+            let dark = !theme::light();
+            let bg_fill = if dark {
+                Color32::from_rgba_premultiplied(22, 24, 29, 210)
+            } else {
+                Color32::from_rgba_premultiplied(240, 242, 248, 220)
+            };
+            let border_color = if dark {
+                Color32::from_white_alpha(32)
+            } else {
+                Color32::from_black_alpha(25)
+            };
+
+            egui::Frame::new()
+                .fill(bg_fill)
+                .stroke(egui::Stroke::new(1.0, border_color))
+                .corner_radius(22)
+                .inner_margin(egui::Margin::symmetric(14, 8))
+                .shadow(egui::epaint::Shadow {
+                    offset: [0, 10],
+                    blur: 28,
+                    spread: 0,
+                    color: Color32::from_black_alpha(110),
+                })
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing = egui::vec2(10.0, 0.0);
+
+                        // Icon container
+                        let (icon_rect, _) = ui.allocate_exact_size(egui::vec2(26.0, 26.0), Sense::hover());
+                        ui.painter().circle_filled(icon_rect.center(), 13.0, Color32::from_white_alpha(20));
+                        ui.painter().circle_stroke(icon_rect.center(), 13.0, egui::Stroke::new(1.0, Color32::from_white_alpha(30)));
+                        
+                        // Vector download icon (arrow down + tray)
+                        let c = icon_rect.center();
+                        let fg = theme::text();
+                        let stroke = egui::Stroke::new(1.6, fg);
+                        // Arrow line
+                        ui.painter().line_segment([pos2(c.x, c.y - 5.0), pos2(c.x, c.y + 3.0)], stroke);
+                        // Arrow head
+                        ui.painter().line_segment([pos2(c.x - 3.5, c.y - 0.5), pos2(c.x, c.y + 3.5)], stroke);
+                        ui.painter().line_segment([pos2(c.x + 3.5, c.y - 0.5), pos2(c.x, c.y + 3.5)], stroke);
+                        // Tray
+                        ui.painter().line_segment([pos2(c.x - 5.0, c.y + 3.0), pos2(c.x - 5.0, c.y + 6.0)], stroke);
+                        ui.painter().line_segment([pos2(c.x - 5.0, c.y + 6.0), pos2(c.x + 5.0, c.y + 6.0)], stroke);
+                        ui.painter().line_segment([pos2(c.x + 5.0, c.y + 6.0), pos2(c.x + 5.0, c.y + 3.0)], stroke);
+
+                        // Text column
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing = egui::vec2(0.0, 1.0);
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new(title).font(theme::semibold(12.5)).color(theme::text()));
+                                let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(5.0, 5.0), Sense::hover());
+                                ui.painter().circle_filled(dot_rect.center(), 2.5, Color32::from_rgb(56, 189, 248));
+                            });
+                            ui.label(egui::RichText::new(&sub).font(theme::regular(11.0)).color(theme::text_dim()));
+                        });
+
+                        ui.add_space(4.0);
+
+                        // Action Button ("Mulai Ulang" / "Restart")
+                        let btn_color = if dark { Color32::from_white_alpha(28) } else { Color32::from_black_alpha(20) };
+                        let btn = egui::Button::new(egui::RichText::new(btn_label).font(theme::semibold(11.5)).color(theme::text()))
+                            .fill(btn_color)
+                            .corner_radius(12)
+                            .stroke(egui::Stroke::new(1.0, Color32::from_white_alpha(35)));
+                        if ui.add(btn).clicked() {
+                            do_restart = true;
+                        }
+
+                        // Close button (×)
+                        let (close_rect, close_resp) = ui.allocate_exact_size(egui::vec2(18.0, 18.0), Sense::click());
+                        let close_hover = close_resp.hovered();
+                        if close_hover {
+                            ui.painter().circle_filled(close_rect.center(), 9.0, Color32::from_white_alpha(25));
+                        }
+                        let x_color = if close_hover { theme::text() } else { theme::text_dim() };
+                        let x_stroke = egui::Stroke::new(1.4, x_color);
+                        let cc = close_rect.center();
+                        ui.painter().line_segment([pos2(cc.x - 3.0, cc.y - 3.0), pos2(cc.x + 3.0, cc.y + 3.0)], x_stroke);
+                        ui.painter().line_segment([pos2(cc.x + 3.0, cc.y - 3.0), pos2(cc.x - 3.0, cc.y + 3.0)], x_stroke);
+                        if close_resp.clicked() {
+                            do_dismiss = true;
+                        }
+                    });
+                });
+        });
+
+    if do_restart {
+        app.restart_to_update(ctx);
+    }
+    if do_dismiss {
+        app.update_dismissed = true;
+    }
+
+    if age < 0.6 {
         ctx.request_repaint();
     }
 }

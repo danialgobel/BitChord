@@ -459,7 +459,7 @@ async fn download_whole(http: &reqwest::Client, url: &str, ua: &str, shared: &Ar
                 return anyhow::Ok(());
             }
         }
-        anyhow::ensure!(received == shared.total, "short read: {received} of {} bytes", shared.total);
+        anyhow::ensure!(received >= shared.total, "short read: {received} of {} bytes", shared.total);
         if idx < blocks {
             shared.put(idx, buf.split().freeze());
         }

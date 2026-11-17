@@ -1,6 +1,10 @@
 /target
 
 installer/Output/
+release/
+*.bak
+*.pyc
+__pycache__/
 .claude/
 
 server/target/

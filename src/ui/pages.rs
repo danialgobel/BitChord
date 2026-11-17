@@ -70,9 +70,10 @@ pub fn page(app: &mut App, ui: &mut Ui, now: f64) {
             Page::Settings => settings(app, ui),
             Page::Transfer => super::transfer::page(app, ui, now),
             Page::Jam => super::jam::page(app, ui),
+            Page::Onboarding => super::onboarding::page(app, ui),
         }
         // Room to scroll the last rows clear of the player's frosted strip.
-        ui.add_space(96.0);
+        ui.add_space(130.0);
     });
     selection_bar(app, ui.ctx(), &page, out.inner_rect);
     // Infinite scroll on home: fetch the next shelves when nearing the bottom.
@@ -1148,7 +1149,7 @@ fn settings_body(app: &mut App, ui: &mut Ui) {
 fn settings_account(app: &mut App, ui: &mut Ui) {
     section_label(ui, "Account", None);
     let busy = app.signing_in.load(Ordering::Relaxed);
-    let (mut sign_in, mut sign_out) = (false, false);
+    let (mut sign_in, mut sign_out, mut open_onboarding) = (false, false, false);
     // Asked again now and then while Settings shows: a failed ask, or a channel made since.
     let now = ui.input(|i| i.time);
     if app.logged_in && app.channels_asked.is_none_or(|at| now - at > 60.0) {
@@ -1177,6 +1178,10 @@ fn settings_account(app: &mut App, ui: &mut Ui) {
                 }
             });
         }
+        divider(ui);
+        setting_row(ui, "Platform Connection", Some("Hubungkan atau kelola akun musik dari Google & YouTube, Spotify, Apple Music, atau Guest."), |ui| {
+            open_onboarding = pill(ui, "Pilih Platform", None, false).clicked();
+        });
     });
     if busy {
         ui.add_space(6.0);
@@ -1187,6 +1192,9 @@ fn settings_account(app: &mut App, ui: &mut Ui) {
     }
     if sign_out {
         app.backend.request(crate::backend::Req::Logout);
+    }
+    if open_onboarding {
+        app.actions.push(Action::Go(Page::Onboarding));
     }
 }
 
@@ -1258,6 +1266,14 @@ fn settings_playback(app: &mut App, ui: &mut Ui) {
         divider(ui);
         setting_row(ui, "Output device", Some("Where the music plays. A picked device that isn't connected leaves it to Windows' default until it's back."), |ui| {
             output_device_picker(app, ui);
+        });
+        divider(ui);
+        setting_row(ui, "Bit-Perfect Mode (WASAPI Exclusive)", Some("Direct hardware output mode that bypasses the Windows software mixer. Guarantees pure bit-perfect stream to your DAC/headphones without software resampling."), |ui| {
+            let mut exclusive = app.exclusive_audio;
+            if toggle(ui, &mut exclusive, "Bit-Perfect Mode").changed() {
+                app.exclusive_audio = exclusive;
+                app.audio.set_exclusive(exclusive);
+            }
         });
         divider(ui);
         setting_row(ui, "Automix", Some("Slide from one song into the next the way a DJ would: both hold their level for a moment, then swap in one smooth move, instead of a straight fade. The mix picks its own length, in phrases of 8 or 16 bars (16 on long songs), following the beat it hears."), |ui| {
@@ -1792,17 +1808,17 @@ pub(super) fn paint_app_icon(ui: &Ui, v: &crate::appicon::Variant, rect: Rect) {
 /// Returns the new choice ("" for the theme's).
 fn font_picker(ui: &mut Ui) -> Option<String> {
     let current = theme::font_choice();
-    let btn = dropdown_button(ui, if current.is_empty() { "Theme's font" } else { &current }, 220.0, "Font");
+    let btn = dropdown_button(ui, if current.is_empty() { "Theme's font" } else { &current }, 240.0, "Font");
     let just_opened = btn.clicked();
     let mut picked = None;
     egui::Popup::menu(&btn).show(|ui| {
-        ui.set_width(220.0);
+        ui.set_width(260.0);
         ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
-        egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+        egui::ScrollArea::vertical().max_height(380.0).show(ui, |ui| {
             ui.add_space(4.0);
-            let mut row = |ui: &mut Ui, label: &str, value: &str| {
+            let mut row = |ui: &mut Ui, label: &str, value: &str, font_preview: Option<egui::FontId>| {
                 let on = current.eq_ignore_ascii_case(value);
-                let r = option_row(ui, label, on);
+                let r = font_option_row(ui, label, on, font_preview);
                 if on && just_opened {
                     r.scroll_to_me(Some(egui::Align::Center));
                 }
@@ -1811,9 +1827,11 @@ fn font_picker(ui: &mut Ui) -> Option<String> {
                     ui.close();
                 }
             };
-            row(ui, "Theme's font", "");
+            row(ui, "Theme's font", "", None);
             for name in theme::BUNDLED_FONTS {
-                row(ui, name, name);
+                let on = current.eq_ignore_ascii_case(name);
+                let preview = Some(theme::font_preview_id(name, on));
+                row(ui, name, name, preview);
             }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
@@ -1822,10 +1840,16 @@ fn font_picker(ui: &mut Ui) -> Option<String> {
             });
             ui.add_space(4.0);
             let ctx = ui.ctx().clone();
-            match theme::installed_fonts(move || ctx.request_repaint()) {
+            let current_choice = current.clone();
+            match theme::installed_fonts(move || {
+                theme::install_fonts(&ctx, &current_choice);
+                ctx.request_repaint();
+            }) {
                 Some(fonts) => {
                     for f in fonts {
-                        row(ui, &f.name, &f.name);
+                        let on = current.eq_ignore_ascii_case(&f.name);
+                        let preview = Some(theme::font_preview_id(&f.name, on));
+                        row(ui, &f.name, &f.name, preview);
                     }
                 }
                 None => {
@@ -1839,6 +1863,22 @@ fn font_picker(ui: &mut Ui) -> Option<String> {
         });
     });
     picked.filter(|p| *p != current)
+}
+
+/// A font dropdown option: styled in its own font preview, with hover glass and checkmark.
+fn font_option_row(ui: &mut Ui, label: &str, selected: bool, preview_font: Option<egui::FontId>) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), Sense::click());
+    let resp = widgets::named(resp, label).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let h = theme::anim_bool(ui.ctx(), resp.id.with("h"), resp.hovered(), 0.12);
+    if h > 0.0 || selected {
+        ui.painter().rect_filled(rect, 8.0, theme::glass(0.05 * selected as u8 as f32 + 0.08 * h));
+    }
+    let font = preview_font.unwrap_or_else(|| if selected { theme::semibold(14.0) } else { theme::regular(14.0) });
+    widgets::text_at(ui, pos2(rect.left() + 12.0, rect.center().y - 9.0), label, font, theme::text(), rect.width() - 44.0);
+    if selected {
+        widgets::icon_at(ui, pos2(rect.right() - 16.0, rect.center().y), theme::icon::CHECK, 15.0, theme::text());
+    }
+    resp
 }
 
 const SYSTEM_DEFAULT: &str = "Windows default";

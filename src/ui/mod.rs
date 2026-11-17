@@ -17,6 +17,7 @@ mod lyric_prefs;
 mod mini;
 mod notes;
 mod nowplaying;
+mod onboarding;
 mod pages;
 mod playback;
 mod queue;
@@ -68,6 +69,8 @@ pub enum Page {
     Transfer,
     /// Listen together.
     Jam,
+    /// Multi-platform onboarding.
+    Onboarding,
 }
 
 #[derive(Clone, Copy, PartialEq, Hash, Debug)]
@@ -406,6 +409,7 @@ pub struct App {
     hires_focus: bool,
     /// Ask the addons for Dolby Atmos renditions.
     prefer_atmos: bool,
+    pub exclusive_audio: bool,
     /// What the playing stream is (codec, rate, depth, size), when a hi-res source
     /// supplied it, with the generation it belongs to.
     audio_info: Option<(u64, crate::hires::Info)>,
@@ -487,6 +491,8 @@ pub struct App {
     /// When the last automatic update check ran (app time, s).
     update_checked: Option<f64>,
     update_announced: bool,
+    update_dismissed: bool,
+    update_notif_shown: Option<f64>,
     /// Release notes dialog (update ready, or "See all notes").
     notes_dialog: Option<notes::NotesDialog>,
     /// Version whose "Updated to" card is showing, on the first launch after an update.
@@ -524,6 +530,7 @@ pub struct App {
     good_window: Option<String>,
     /// The sidebar is a narrow icon rail.
     sidebar_collapsed: bool,
+    pub(super) onboarded: bool,
     /// The sidebar playlists' order (by id), and the ones hidden from it.
     playlist_order: Vec<String>,
     hidden_playlists: HashSet<String>,
@@ -578,11 +585,17 @@ impl App {
         // Before any request: a song started at launch (dev hooks) must see this setting.
         backend.set_high_quality(get("high_quality").is_none_or(|v| v == "1"));
         // Before any request: a song started at launch must see the hi-res source too.
-        let hires_source = get("hires_source").unwrap_or_default();
-        let hires_sources: Vec<String> = hires_source.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect();
+        let hires_source = get("hires_source").unwrap_or_else(|| "http://127.0.0.1:8765".to_string());
+        let hires_sources: Vec<String> = if hires_source.trim().is_empty() {
+            vec!["http://127.0.0.1:8765".to_string()]
+        } else {
+            hires_source.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect()
+        };
         backend.set_hires_source(&hires_sources.join("\n"));
         let prefer_atmos = get("prefer_atmos").is_some_and(|v| v == "1");
         backend.set_prefer_atmos(prefer_atmos);
+        let exclusive_audio = get("exclusive_audio").is_some_and(|v| v == "1");
+        audio.set_exclusive(exclusive_audio);
         backend.request(Req::Home(None));
         if logged_in {
             backend.request(Req::Library);
@@ -675,11 +688,14 @@ impl App {
             window_hidden: false,
             good_window: get("window"),
             sidebar_collapsed: get("sidebar_collapsed").is_some_and(|v| v == "1"),
+            onboarded: get("onboarded").is_some_and(|v| v == "1"),
             playlist_order: get("playlist_order").map(|v| v.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect()).unwrap_or_default(),
             hidden_playlists: get("hidden_playlists").map(|v| v.lines().filter(|l| !l.is_empty()).map(str::to_owned).collect()).unwrap_or_default(),
             coll_search: None,
             update_checked: None,
             update_announced: false,
+            update_dismissed: false,
+            update_notif_shown: None,
             notes_dialog: None,
             // First launch of a newer version than last time: show what changed.
             // YTM_WHATS_NEW=1 shows the card for this version regardless.
@@ -717,6 +733,7 @@ impl App {
             hires_draft: String::new(),
             hires_focus: false,
             prefer_atmos,
+            exclusive_audio,
             audio_info: None,
             art_changed: -10.0,
             accent: theme::RED,
@@ -797,6 +814,7 @@ impl App {
             Ok("settings") => app.go(Page::Settings),
             Ok("transfer") => app.go(Page::Transfer),
             Ok("jam") => app.go(Page::Jam),
+            Ok("onboarding") | Ok("welcome") => app.go(Page::Onboarding),
             Ok(p) if p.starts_with("album:") => app.go(Page::Album(p[6..].to_owned())),
             Ok(p) if p.starts_with("artist:") => app.go(Page::Artist(p[7..].to_owned())),
             Ok(p) if p.starts_with("playlist:") => app.go(Page::Playlist(p[9..].to_owned())),
@@ -829,6 +847,9 @@ impl App {
             app.queue_open = true;
         }
         jam::dev_hooks(&mut app);
+        if !app.onboarded && app.page == Page::Home && std::env::var("YTM_PAGE").is_err() {
+            app.page = Page::Onboarding;
+        }
         app.audio.set_normalize(app.normalize);
         app.set_crossfade();
         app
@@ -1193,7 +1214,12 @@ impl eframe::App for App {
                 ctx.request_repaint_after(Duration::from_millis(250));
             }
         } else if self.np_open && playing && !self.mini.busy() {
-            ctx.request_repaint_after(Duration::from_millis(33));
+            if self.lyric_prefs.anim_mode == lyric_prefs::LyricAnimMode::ConvexLens {
+                // Rock-solid 60 FPS (16ms) for Convex Lens 3-word focus roller
+                ctx.request_repaint_after(Duration::from_millis(16));
+            } else {
+                ctx.request_repaint_after(Duration::from_millis(33));
+            }
         } else if playing && widgets::equalizer_shown(ctx) {
             // The playing row's bars need a steady, full rate to read as smooth.
             ctx.request_repaint_after(Duration::from_millis(16));
@@ -1243,6 +1269,7 @@ impl eframe::App for App {
                 titlebar::resize_sides(&ctx);
                 // "Sign in to like songs" and such: shown here too, not timed out unseen.
                 shell::toast(self, &ctx, now);
+        shell::update_notification(self, &ctx, now);
                 self.mini.fade_in(&ctx, now, shell::base_color(self));
             }
             dev_screenshot(&ctx, now);
@@ -1277,16 +1304,25 @@ impl eframe::App for App {
                     .outer_margin(egui::Margin { left: 10, right: 4, top: 10, bottom: 10 })
                     .inner_margin(egui::Margin::symmetric(12, 14)),
             };
-            // The sidebar first, so it runs the window's full height: the player floats
-            // over the main section only, and the page content scrolls under it.
-            egui::Panel::left("nav").resizable(false)
-                .exact_size(shell::SIDEBAR_W - (shell::SIDEBAR_W - shell::RAIL_W) * shell::sidebar_collapse(self, &ctx))
-                .frame(side_frame)
-                .show_separator_line(false)
-                .show(ui, |ui| shell::sidebar(self, ui));
+            let is_mobile = cfg!(target_os = "android") || (screen.width() < 640.0 && screen.width() < screen.height());
+            if !is_mobile {
+                // Desktop: sidebar panel on the left
+                egui::Panel::left("nav").resizable(false)
+                    .exact_size(shell::SIDEBAR_W - (shell::SIDEBAR_W - shell::RAIL_W) * shell::sidebar_collapse(self, &ctx))
+                    .frame(side_frame)
+                    .show_separator_line(false)
+                    .show(ui, |ui| shell::sidebar(self, ui));
+            } else {
+                // Mobile: bottom navigation bar
+                egui::Panel::bottom("mobile_nav").resizable(false)
+                    .exact_size(56.0)
+                    .frame(egui::Frame::new().fill(theme::panel(0.92)).inner_margin(egui::Margin::symmetric(8, 2)))
+                    .show_separator_line(false)
+                    .show(ui, |ui| shell::mobile_nav(self, ui));
+            }
             let section = ui.available_rect_before_wrap();
             let q = theme::anim_bool(&ctx, "queue-drawer", self.queue_open && !self.np_open, 0.25);
-            if q > 0.01 {
+            if q > 0.01 && !is_mobile {
                 egui::Panel::right("queue").resizable(false)
                     .exact_size(340.0 * q)
                     .frame(egui::Frame::new().fill(theme::panel(0.42)).inner_margin(egui::Margin::symmetric(14, 16)))
@@ -1294,8 +1330,10 @@ impl eframe::App for App {
                     .show(ui, |ui| shell::queue_drawer(self, ui));
             }
             let main_right = ui.available_rect_before_wrap().right();
+            let pad_h = if is_mobile { 14 } else { 28 };
+            let pad_t = if is_mobile { 10 } else { titlebar::top_margin(14, 42.0) };
             egui::CentralPanel::default()
-                .frame(egui::Frame::new().inner_margin(egui::Margin { left: 28, right: 28, top: titlebar::top_margin(14, 42.0), bottom: 0 }))
+                .frame(egui::Frame::new().inner_margin(egui::Margin { left: pad_h, right: pad_h, top: pad_t, bottom: if is_mobile { 110 } else { 0 } }))
                 .show(ui, |ui| {
                     shell::top_bar(self, ui);
                     ui.add_space(2.0);
@@ -1303,8 +1341,12 @@ impl eframe::App for App {
                 });
             // The player: a frosted strip over the bottom of the main section, above the
             // pages, so their last rows fade under it instead of stopping at a seam.
-            let strip = egui::Rect::from_min_max(egui::pos2(section.left(), screen.bottom() - self.bar_height()), egui::pos2(main_right, screen.bottom()));
-            egui::Area::new(egui::Id::new("player-bar"))
+            let strip = if is_mobile {
+                egui::Rect::from_min_max(egui::pos2(screen.left(), screen.bottom() - 56.0 - self.bar_height()), egui::pos2(screen.right(), screen.bottom() - 56.0))
+            } else {
+                egui::Rect::from_min_max(egui::pos2(section.left(), screen.bottom() - self.bar_height()), egui::pos2(main_right, screen.bottom()))
+            };
+            egui::Area::new(egui::Id::unique("player-bar"))
                 .fixed_pos(strip.min)
                 .order(egui::Order::Middle)
                 .show(&ctx, |ui| {
@@ -1324,6 +1366,7 @@ impl eframe::App for App {
         if let Some(url) = self.share_pending.take() { ctx.copy_text(url); }
         shell::suggestions(self, &ctx);
         shell::toast(self, &ctx, now);
+        shell::update_notification(self, &ctx, now);
 
         // The player keeps the window buttons too: the top right stays the window's.
         titlebar::window_buttons(&ctx);
@@ -1417,6 +1460,7 @@ impl eframe::App for App {
         }
         storage.set_string("close_to_tray", b(self.close_to_tray));
         storage.set_string("sidebar_collapsed", b(self.sidebar_collapsed));
+        storage.set_string("onboarded", b(self.onboarded));
         // The sidebar's playlist order, completed with any playlist that appeared since
         // it was last changed (so a drag can place them all).
         if let Some(l) = &self.library {
@@ -1449,6 +1493,7 @@ impl eframe::App for App {
         storage.set_string("signature_api", self.signature_api.clone());
         storage.set_string("hires_source", self.hires_sources.join("\n"));
         storage.set_string("prefer_atmos", b(self.prefer_atmos));
+        storage.set_string("exclusive_audio", b(self.exclusive_audio));
         storage.set_string("sponsorblock", b(self.sponsorblock));
         storage.set_string("crossfade", b(self.crossfade));
         storage.set_string("automix", b(self.automix));
@@ -1559,15 +1604,25 @@ fn fit_window_to_monitor(ctx: &egui::Context) {
     let (outer, monitor, maximized) = ctx.input(|i| (i.viewport().outer_rect, i.viewport().monitor_size, i.viewport().maximized));
     let (Some(outer), Some(monitor)) = (outer, monitor) else { return };
     ctx.data_mut(|d| d.insert_temp(done, true));
+
+    // Dynamic UI Zoom adaptation for small laptop screens:
+    // If monitor vertical logical resolution is tight (<= 768p or 1080p @ 150% scaling where monitor.y <= 750.0):
+    if monitor.y <= 750.0 {
+        ctx.set_zoom_factor(0.88);
+    } else if monitor.y <= 850.0 {
+        ctx.set_zoom_factor(0.94);
+    }
+
     let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, monitor);
     // A saved size below the minimum (closed while minimized saves a tiny one, which
     // eframe restores as-is) would open a window too small to see: start over centred.
     let min = egui::Vec2::from(crate::MIN_SIZE);
-    if maximized != Some(true) && (outer.width() < min.x || outer.height() < min.y) {
-        let size = egui::Vec2::from(crate::DEFAULT_SIZE).min(monitor * 0.9).max(min);
-        log::info!("window {outer:?} is below the minimum size; resetting to {size:?}");
-        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(size));
-        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(((monitor - size) / 2.0).max(egui::Vec2::ZERO).to_pos2()));
+    let safe_size = egui::vec2((monitor.x * 0.90).min(crate::DEFAULT_SIZE[0]), (monitor.y * 0.86).min(crate::DEFAULT_SIZE[1])).max(min);
+
+    if maximized != Some(true) && (outer.width() < min.x || outer.height() < min.y || outer.height() > monitor.y - 40.0) {
+        log::info!("window {outer:?} needs fitting to monitor {monitor:?}; setting to {safe_size:?}");
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(safe_size));
+        ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(((monitor - safe_size) / 2.0).max(egui::Vec2::ZERO).to_pos2()));
         return;
     }
     // A little slack for the invisible resize borders Windows adds around the frame.

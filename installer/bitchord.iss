@@ -1,12 +1,10 @@
 ; Inno Setup script for BitChord.
 ; Build: cargo build --release, then
 ;   iscc installer\bitchord.iss
-; Output: installer\Output\bitchord-setup-<version>.exe
-; ARM64: cargo build --release --target aarch64-pc-windows-msvc, then
-;   iscc /DArm64 installer\bitchord.iss  ->  bitchord-setup-<version>-arm64.exe
+; Output: installer\Output\BitChord-Setup-<version>.exe
 
 #define AppName "BitChord"
-#define AppVersion "2.0.0"
+#define AppVersion "2.0.1"
 #define AppExe "bitchord.exe"
 #ifdef Arm64
   #define Arch "arm64"
@@ -22,19 +20,20 @@
 AppId={{6E0B7C4A-2D1F-4C8E-9B3A-7F5D1E2A9C40}
 AppName={#AppName}
 AppVersion={#AppVersion}
-AppPublisher=jackychan4891
-AppPublisherURL=https://github.com/jackychan4891/BitChord-PC-Continued
-AppSupportURL=https://github.com/jackychan4891/BitChord-PC-Continued/issues
+AppPublisher=Danial Gobel
+AppPublisherURL=https://github.com/danialgobel/BitChord
+AppSupportURL=https://github.com/danialgobel/BitChord/issues
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 DisableProgramGroupPage=yes
-; Per-user install by default (no UAC prompt); the user can pick all-users instead.
-PrivilegesRequired=lowest
-PrivilegesRequiredOverridesAllowed=dialog
+; Default to admin (Program Files), with dialog override allowed for non-admin per-user install
+PrivilegesRequired=admin
+PrivilegesRequiredOverridesAllowed=commandline dialog
 ArchitecturesAllowed={#Arch}
 ArchitecturesInstallIn64BitMode={#Arch}
 MinVersion=10.0
-OutputBaseFilename=bitchord-setup-{#AppVersion}{#Suffix}
+OutputBaseFilename=BitChord-Setup-{#AppVersion}{#Suffix}
+OutputDir=..\release
 Compression=lzma2/ultra
 SolidCompression=yes
 WizardStyle=modern
@@ -47,6 +46,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "{#BinDir}\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\WebView2Loader.dll"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#BinDir}\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
@@ -64,8 +65,39 @@ Root: HKA; Subkey: "Software\Classes\ytm-rs\DefaultIcon"; ValueType: string; Val
 Root: HKA; Subkey: "Software\Classes\ytm-rs\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
 
 [UninstallDelete]
-; Installers downloaded by the in-app updater.
+; Installers downloaded by the in-app updater (leaves user configs and library intact)
 Type: filesandordirs; Name: "{userappdata}\ytm-rs\data\updates"
 
 [Run]
 Filename: "{app}\{#AppExe}"; Description: "{cm:LaunchProgram,{#AppName}}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+function IsWebView2Installed: Boolean;
+var
+  Version: String;
+begin
+  Result := RegQueryStringValue(HKLM, 'SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', Version) or
+            RegQueryStringValue(HKLM, 'SOFTWARE\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', Version) or
+            RegQueryStringValue(HKCU, 'Software\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}', 'pv', Version);
+  if Result and (Version = '') then
+    Result := False;
+end;
+
+function NextButtonClick(CurPageID: Integer): Boolean;
+var
+  ErrorCode: Integer;
+begin
+  Result := True;
+  if CurPageID = wpReady then
+  begin
+    if not IsWebView2Installed then
+    begin
+      if MsgBox('BitChord requires the Microsoft Edge WebView2 Runtime for Google/Spotify sign-in.' + #13#10 +
+                'It was not detected on your PC.' + #13#10#13#10 +
+                'Would you like to open the official download page to install it?', mbConfirmation, MB_YESNO) = IDYES then
+      begin
+        ShellExec('open', 'https://go.microsoft.com/fwlink/p/?LinkId=2124703', '', '', SW_SHOWNORMAL, ewNoWait, ErrorCode);
+      end;
+    end;
+  end;
+end;

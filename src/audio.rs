@@ -39,6 +39,7 @@ pub enum AudioCmd {
     /// Play through this device (cpal's id) whenever it's connected; None follows the
     /// system default.
     SetDevice(Option<String>),
+    SetExclusive(bool),
 }
 
 pub enum AudioEvent {
@@ -88,9 +89,33 @@ pub struct AudioStatus {
     outgoing_position_ms: AtomicU64,
     outgoing_sampled_at: AtomicU64,
     outgoing_playing: AtomicBool,
+    pub output_sample_rate: AtomicU32,
+    pub source_sample_rate: AtomicU32,
+    pub bit_perfect: AtomicBool,
+    pub exclusive: AtomicBool,
 }
 
 impl AudioStatus {
+    pub fn output_rate(&self) -> u32 {
+        self.output_sample_rate.load(Ordering::Relaxed)
+    }
+
+    pub fn source_rate(&self) -> u32 {
+        self.source_sample_rate.load(Ordering::Relaxed)
+    }
+
+    pub fn is_bit_perfect(&self) -> bool {
+        self.bit_perfect.load(Ordering::Relaxed)
+    }
+
+    pub fn set_exclusive(&self, on: bool) {
+        self.exclusive.store(on, Ordering::Relaxed);
+    }
+
+    pub fn is_exclusive(&self) -> bool {
+        self.exclusive.load(Ordering::Relaxed)
+    }
+
     pub fn position(&self) -> Duration {
         Duration::from_millis(self.position_ms.load(Ordering::Relaxed))
     }
@@ -543,6 +568,11 @@ impl AudioHandle {
         self.send(AudioCmd::Volume(self.volume()));
     }
 
+    pub fn set_exclusive(&self, on: bool) {
+        self.status.set_exclusive(on);
+        self.send(AudioCmd::SetExclusive(on));
+    }
+
     /// Switches the slider's curve, moving it so the music stays as loud as it was.
     pub fn set_log_volume(&self, on: bool) {
         if self.status.log_volume.swap(on, Ordering::Relaxed) != on {
@@ -770,6 +800,7 @@ impl Output {
             rodio::cpal::BufferSize::Default => 0,
         };
         status.latency_ms.store((buffer_ms + 10) as u32, Ordering::Relaxed);
+        status.output_sample_rate.store(rate, Ordering::Relaxed);
         log::info!("audio: output device {:?} at {} Hz", id, rate);
         self.sink = Some(sink);
         self.device = id;
@@ -939,6 +970,12 @@ fn run(
                 if output.sink.is_none() || output.default_changed() {
                     output.open(tx.clone(), &status);
                 }
+                let src_rate = rodio::Source::sample_rate(&decoder).get();
+                status.source_sample_rate.store(src_rate, Ordering::Relaxed);
+                let out_rate = status.output_sample_rate.load(Ordering::Relaxed);
+                let is_lossless = s.info.as_ref().is_some_and(|i| i.lossless());
+                let perfect = is_lossless && (src_rate == out_rate || out_rate == 0) && (!status.normalize.load(Ordering::Relaxed) || s.loudness_db.is_none());
+                status.bit_perfect.store(perfect, Ordering::Relaxed);
                 player.clear();
                 let gain = norm_gain(&status, Some(&s));
                 log::info!("audio: loudness {:?} dB, normalization gain {gain:.3}", s.loudness_db);
@@ -1128,6 +1165,13 @@ fn run(
             Ok(AudioCmd::SetDevice(id)) => {
                 log::info!("audio: output device set to {id:?}");
                 output.preferred = id;
+                if output.default_changed() || output.sink.is_none() {
+                    output.open(tx.clone(), &status);
+                }
+            }
+            Ok(AudioCmd::SetExclusive(on)) => {
+                log::info!("audio: exclusive / bit-perfect output mode: {on}");
+                status.set_exclusive(on);
                 if output.default_changed() || output.sink.is_none() {
                     output.open(tx.clone(), &status);
                 }

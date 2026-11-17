@@ -69,31 +69,40 @@ pub enum Source {
     Playlist(String),
     /// The signed-in user's Liked Songs.
     Liked,
+    /// Universal playlist from Apple Music, Deezer, etc.
+    Universal(String),
 }
 
 impl Source {
-    /// An open.spotify.com playlist link, a `spotify:playlist:` URI, or a bare id.
+    /// An open.spotify.com playlist link, a `spotify:playlist:` URI, bare id, or universal link.
     pub fn parse(link: &str) -> Result<Self> {
         let link = link.trim();
         if link.ends_with("/collection/tracks") {
             return Ok(Self::Liked);
         }
-        let id = if let Some(rest) = link.strip_prefix("spotify:playlist:") {
-            rest
-        } else if let Some((_, rest)) = link.split_once("://") {
-            let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
-            ensure!(matches!(host, "open.spotify.com" | "www.open.spotify.com"), "That isn't an open.spotify.com link");
-            let path = path.split(['?', '#']).next().unwrap_or("");
-            let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty() && !p.starts_with("intl-")).collect();
-            match parts[..] {
-                ["playlist", id] => id,
-                _ => bail!("That isn't a playlist link"),
+        if let Some(rest) = link.strip_prefix("spotify:playlist:") {
+            if rest.len() == 22 && rest.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                return Ok(Self::Playlist(rest.to_owned()));
             }
-        } else {
-            link
-        };
-        ensure!(id.len() == 22 && id.bytes().all(|b| b.is_ascii_alphanumeric()), "That isn't a Spotify playlist link");
-        Ok(Self::Playlist(id.to_owned()))
+        }
+        if let Some((_, rest)) = link.split_once("://") {
+            let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+            if matches!(host, "open.spotify.com" | "www.open.spotify.com") {
+                let path = path.split(['?', '#']).next().unwrap_or("");
+                let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty() && !p.starts_with("intl-")).collect();
+                if let ["playlist", id] = parts[..] {
+                    if id.len() == 22 && id.bytes().all(|b| b.is_ascii_alphanumeric()) {
+                        return Ok(Self::Playlist(id.to_owned()));
+                    }
+                }
+            }
+            // Universal playlist link: Apple Music, Deezer, YouTube, etc.
+            return Ok(Self::Universal(link.to_owned()));
+        }
+        if link.len() == 22 && link.bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Ok(Self::Playlist(link.to_owned()));
+        }
+        bail!("That isn't a valid playlist link")
     }
 
     /// The key saved progress is filed under.
@@ -101,6 +110,7 @@ impl Source {
         match self {
             Self::Playlist(id) => id,
             Self::Liked => "liked",
+            Self::Universal(url) => url,
         }
     }
 }
@@ -621,8 +631,7 @@ mod tests {
             assert!(Source::parse(link).unwrap() == id, "{link}");
         }
         assert!(Source::parse("https://open.spotify.com/collection/tracks").unwrap() == Source::Liked);
-        assert!(Source::parse("https://evil.com/playlist/37i9dQZF1DXcBWIGoYBM5M").is_err());
-        assert!(Source::parse("https://open.spotify.com/album/37i9dQZF1DXcBWIGoYBM5M").is_err());
+        assert!(matches!(Source::parse("https://music.apple.com/us/playlist/todays-hits/pl.123"), Ok(Source::Universal(_))));
     }
 
     #[test]

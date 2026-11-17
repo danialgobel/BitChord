@@ -6,6 +6,44 @@ use std::collections::HashMap;
 
 use crate::lyrics::{Line, Lyrics, LyricsSet, Provider};
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum LyricAnimMode {
+    #[default]
+    Standard,
+    KineticPop,
+    Constellation,
+    ConvexLens,
+    PhysicsThrow,
+    CodeEditor,
+    Chat,
+}
+
+impl LyricAnimMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::KineticPop => "kinetic",
+            Self::Constellation => "constellation",
+            Self::ConvexLens => "convex",
+            Self::PhysicsThrow => "gravity",
+            Self::CodeEditor => "code",
+            Self::Chat => "chat",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "kinetic" => Self::KineticPop,
+            "constellation" => Self::Constellation,
+            "convex" => Self::ConvexLens,
+            "gravity" => Self::PhysicsThrow,
+            "code" | "editor" => Self::CodeEditor,
+            "chat" | "imessage" => Self::Chat,
+            _ => Self::Standard,
+        }
+    }
+}
+
 /// Offsets are seconds taken off the lyrics clock: positive shows lyrics later.
 pub struct Prefs {
     pub order: Vec<(Provider, bool)>,
@@ -19,6 +57,8 @@ pub struct Prefs {
     pub pins: HashMap<String, Provider>,
     /// Lyrics text size, as a multiple of the theme's own size.
     pub text_scale: f32,
+    pub anim_mode: LyricAnimMode,
+    pub prev_anim_mode: LyricAnimMode,
 }
 
 /// The range and step of the lyrics text size setting.
@@ -88,6 +128,8 @@ impl Prefs {
                 .and_then(|s| serde_json::from_str::<HashMap<String, String>>(&s).ok())
                 .map(|m| m.into_iter().filter_map(|(k, v)| Provider::from_key(&v).map(|p| (k, p))).collect())
                 .unwrap_or_default(),
+            anim_mode: get("lyric_anim_mode").as_deref().map(LyricAnimMode::from_str).unwrap_or_default(),
+            prev_anim_mode: get("lyric_prev_anim_mode").as_deref().map(LyricAnimMode::from_str).unwrap_or(LyricAnimMode::Standard),
         }
     }
 
@@ -102,6 +144,8 @@ impl Prefs {
         storage.set_string("lyric_song_offsets", serde_json::to_string(&self.song_offsets).unwrap_or_default());
         let pins: HashMap<&String, &str> = self.pins.iter().map(|(k, p)| (k, p.key())).collect();
         storage.set_string("lyric_pins", serde_json::to_string(&pins).unwrap_or_default());
+        storage.set_string("lyric_anim_mode", self.anim_mode.as_str().to_string());
+        storage.set_string("lyric_prev_anim_mode", self.prev_anim_mode.as_str().to_string());
     }
 
     /// Sources that have lyrics for this song, in the listener's order (switched-off ones
