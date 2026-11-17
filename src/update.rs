@@ -90,7 +90,7 @@ fn asset_name(version: &str) -> String {
     } else {
         (if cfg!(target_arch = "aarch64") { "-arm64" } else { "" }.to_owned(), "exe")
     };
-    if portable { format!("ytm-rs-portable-{version}{suffix}.zip") } else { format!("ytm-rs-setup-{version}{suffix}.{setup}") }
+    if portable { format!("BitChord-Portable-{version}{suffix}.zip") } else { format!("BitChord-Setup-{version}{suffix}.{setup}") }
 }
 
 /// The portable build's folder: the download ships a `portable.txt` beside the exe

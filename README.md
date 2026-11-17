@@ -12,6 +12,7 @@
   <p>
     <a href="https://github.com/danialgobel/BitChord/releases/latest">Download Windows (.exe)</a> ·
     <a href="#features">Features</a> ·
+    <a href="#lyrics-modes">Lyrics Modes</a> ·
     <a href="#comparison">Original vs Developed</a> ·
     <a href="#platform-status">Platform Status</a> ·
     <a href="#installation">Installation</a> ·
@@ -66,6 +67,39 @@
   </tr>
   <tr>
     <td colspan="2" align="center"><b>Desktop experience</b> — native Rust UI, liquid glass styling, fast playback, and quality controls</td>
+  </tr>
+</table>
+
+---
+
+<h2 id="lyrics-modes">🎤 Cinematic & Dynamic Lyrics Modes</h2>
+
+BitChord elevates music listening with an industry-first collection of dynamic lyrics animation modes, rendered natively at uncapped frame rates:
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/lyrics/lyrics-apple-kinetic.jpg" alt="Apple Kinetic Pop Mode" width="100%"></td>
+    <td width="50%"><img src="docs/lyrics/lyrics-word-roller.jpg" alt="Focus Word Roller Mode" width="100%"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Apple Kinetic Pop</b> — Real-time word-by-word spring highlights with ambient glow and dynamic background defocus</td>
+    <td align="center"><b>Focus Word Roller</b> — Multi-word optical roller with glowing active typography and kinetic vertical glide</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/lyrics/lyrics-code-editor.jpg" alt="IDE Code Editor Mode" width="100%"></td>
+    <td width="50%"><img src="docs/lyrics/lyrics-chat.png" alt="Chat Bubbles Mode" width="100%"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>IDE Code Editor</b> — Programmer aesthetic with line numbers, syntax-highlighted function chaining, and active cursor</td>
+    <td align="center"><b>iMessage Chat Bubbles</b> — Interactive conversational bubbles with artist avatars and realistic balloon physics</td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/lyrics/lyrics-constellation.jpg" alt="Constellation Melodic Starline Mode" width="100%"></td>
+    <td width="50%"><img src="docs/lyrics/lyrics-giant-pop.jpg" alt="Giant Kinetic Focus Mode" width="100%"></td>
+  </tr>
+  <tr>
+    <td align="center"><b>Melodic Constellation</b> — Star-chart waveform tracking lyric pitch changes across glowing celestial nodes</td>
+    <td align="center"><b>Giant Kinetic Focus</b> — High-impact typography with bold scaling and soft radiant halo</td>
   </tr>
 </table>
 
