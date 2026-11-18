@@ -51,28 +51,7 @@
 
 ---
 
-## Screenshots
-
-<table>
-  <tr>
-    <td width="50%"><img src="docs/readme/screenshot-1.png" alt="Full player with artwork, lyrics and controls"></td>
-    <td width="50%"><img src="docs/readme/screenshot-2.png" alt="Browse view with shelves and navigation"></td>
-  </tr>
-  <tr>
-    <td align="center"><b>Player</b> — artwork, cinematic kinetic lyrics, queue and playback in one view</td>
-    <td align="center"><b>Browse</b> — your music, shelves, explore, and navigation</td>
-  </tr>
-  <tr>
-    <td colspan="2"><img src="docs/readme/screenshot-3.png" alt="BitChord interface and playback" width="100%"></td>
-  </tr>
-  <tr>
-    <td colspan="2" align="center"><b>Desktop experience</b> — native Rust UI, liquid glass styling, fast playback, and quality controls</td>
-  </tr>
-</table>
-
----
-
-<h2 id="lyrics-modes">🎤 Cinematic & Dynamic Lyrics Modes</h2>
+<h2 id="lyrics-modes">Cinematic & Dynamic Lyrics Modes</h2>
 
 BitChord elevates music listening with an industry-first collection of dynamic lyrics animation modes, rendered natively at uncapped frame rates:
 
