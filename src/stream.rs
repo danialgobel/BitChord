@@ -16,8 +16,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-const BLOCK: u64 = 256 * 1024;
-const WORKERS: usize = 4;
+const BLOCK: u64 = 512 * 1024;
+const WORKERS: usize = 6;
 /// Tries per block before the download gives up, waiting a little longer each time
 /// (about half a minute in all): long enough to ride out a dropped connection.
 const RETRIES: u32 = 6;
@@ -27,16 +27,15 @@ const STALL: Duration = Duration::from_secs(20);
 /// googlevideo occasionally starts rejecting a URL partway through (HTTP 403);
 /// a freshly resolved URL for the same video resumes the download.
 const MAX_REFRESHES: u32 = 2;
-/// A prefetch only fetches this much (~16 s of audio) until playback actually opens it:
-/// enough to start at once, without holding a whole extra song in memory.
-const HEAD_BLOCKS: usize = 2;
-/// Files larger than this (about 20 minutes at 256 kbps: long mixes, whole albums in
-/// one video) aren't kept whole. Each reader keeps a window around where it reads,
-/// `AHEAD` blocks forward (about 5 minutes at 256 kbps) and `BEHIND` back; the rest is dropped and
-/// fetched again if a seek goes back to it.
-const WINDOWED_FROM: u64 = 40 * 1024 * 1024;
-const AHEAD: usize = 40;
-const BEHIND: usize = 8;
+/// A prefetch / initial start fetches this much (~2 MB, giving 4-10s of high-res FLAC runway)
+/// before playback starts: enough to start instantly and smoothly without buffer starvation.
+const HEAD_BLOCKS: usize = 4;
+/// Files larger than this (long mixes, whole concert videos > 300 MB) aren't kept whole.
+/// Standard songs (including 24-bit 192kHz studio FLAC at 50-120 MB) stay in memory whole,
+/// preventing chunk eviction so scrubbing and seeking are instantaneous without re-downloading.
+const WINDOWED_FROM: u64 = 300 * 1024 * 1024;
+const AHEAD: usize = 64;
+const BEHIND: usize = 32;
 
 /// Resolves a fresh stream URL for the same video.
 pub type Refresh = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = anyhow::Result<String>> + Send>> + Send + Sync>;
@@ -527,9 +526,7 @@ impl Read for StreamReader {
             if let Some(w) = inner.wants.iter_mut().find(|(id, _)| *id == self.id) {
                 w.1 = idx;
             }
-            if inner.windowed {
-                self.shared.changed.notify_waiters();
-            }
+            self.shared.changed.notify_waiters();
         }
         while inner.blocks[idx].is_none() {
             if let Some(e) = &inner.error {
