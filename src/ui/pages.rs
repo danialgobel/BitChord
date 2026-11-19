@@ -1373,11 +1373,11 @@ fn live_sources(app: &App) -> String {
     app.hires_sources.iter().map(|s| s.trim()).filter(|s| !s.is_empty()).collect::<Vec<_>>().join("\n")
 }
 
-/// Settings › Downloads.
+/// Settings › Downloads & Cache.
 fn settings_downloads(ui: &mut Ui) {
-    section_label(ui, "Downloads", None);
+    section_label(ui, "Downloads & Cache", None);
     ui.label(
-        RichText::new("Download songs from their menu. They're saved at the best quality your account gets, tagged with their cover art, and play from the file, even offline.")
+        RichText::new("Download songs to your library or manage temporary lossless stream caches for instant replays.")
             .font(theme::regular(13.0))
             .color(theme::text_dim()),
     );
@@ -1391,6 +1391,24 @@ fn settings_downloads(ui: &mut Ui) {
             ui.add_space(6.0);
             if pill(ui, "Open", Some(icon::FOLDER_OPEN), false).clicked() {
                 crate::downloads::open_folder();
+            }
+        });
+        divider(ui);
+        let (cached_count, cached_bytes) = crate::cache::stats();
+        let cache_mb = cached_bytes as f64 / 1_048_576.0;
+        let cache_desc = if cached_count == 0 {
+            "No lossless tracks cached yet. Streamed Lossless/Hi-Res tracks are kept on disk for instant replays and seeks (up to 2.0 GB).".to_owned()
+        } else {
+            format!("{cached_count} lossless track{} cached ({cache_mb:.1} MB / 2.0 GB). Auto-cleans least recently played tracks.", if cached_count == 1 { "" } else { "s" })
+        };
+        setting_row(ui, "Smart Lossless Cache", Some(&cache_desc), |ui| {
+            if pill(ui, "Clear", Some(icon::TRASH_2), false).clicked() {
+                crate::cache::clear();
+                ui.ctx().request_repaint();
+            }
+            ui.add_space(6.0);
+            if pill(ui, "Open", Some(icon::FOLDER_OPEN), false).clicked() {
+                crate::cache::open_folder();
             }
         });
     });

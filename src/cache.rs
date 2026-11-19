@@ -219,6 +219,64 @@ pub fn store(video_id: &str, data: Vec<u8>, duration_ms: u64, loudness_db: Optio
     log::info!("{video_id}: saved to smart audio cache ({:.1} MB, total cache: {:.1} MB)", size as f64 / 1_048_576.0, state.total_size as f64 / 1_048_576.0);
 }
 
+/// Returns the number of cached tracks and total disk cache usage in bytes.
+pub fn stats() -> (usize, u64) {
+    if let Ok(state) = STATE.read() {
+        (state.entries.len(), state.total_size)
+    } else {
+        (0, 0)
+    }
+}
+
+/// Open the smart audio cache folder in Windows Explorer or the native file manager.
+pub fn open_folder() {
+    let dir = {
+        let Ok(state) = STATE.read() else { return };
+        if state.dir.as_os_str().is_empty() { return; }
+        state.dir.join("audio")
+    };
+    let _ = std::fs::create_dir_all(&dir);
+    #[cfg(windows)]
+    let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+    #[cfg(target_os = "macos")]
+    let _ = std::process::Command::new("open").arg(&dir).spawn();
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let _ = std::process::Command::new("xdg-open").arg(&dir).spawn();
+}
+
+/// Clear the audio cache and remove cached files.
+pub fn clear() {
+    let mut state = match STATE.write() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    if state.dir.as_os_str().is_empty() {
+        return;
+    }
+    let audio_dir = state.dir.join("audio");
+    if let Ok(rd) = std::fs::read_dir(&audio_dir) {
+        for entry in rd.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+    let mut remaining = HashMap::new();
+    let mut remaining_size = 0;
+    for (id, entry) in state.entries.drain() {
+        let file_path = audio_dir.join(&entry.filename);
+        if file_path.is_file() {
+            remaining_size += entry.size;
+            remaining.insert(id, entry);
+        }
+    }
+    state.entries = remaining;
+    state.total_size = remaining_size;
+    save_index(&state);
+    log::info!("smart audio cache cleared ({} remaining)", state.entries.len());
+}
+
 fn prune_internal(state: &mut CacheState) {
     let mut items: Vec<(String, u64, u64, String)> = state.entries.values().map(|e| (e.video_id.clone(), e.last_accessed, e.size, e.filename.clone())).collect();
     items.sort_by_key(|(_, accessed, _, _)| *accessed);
