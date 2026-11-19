@@ -135,11 +135,16 @@ pub fn init(data_dir: &Path) {
     log::info!("smart audio cache initialized: {} tracks, {:.1} MB", state.entries.len(), state.total_size as f64 / 1_048_576.0);
 }
 
-/// Retrieve a cached stream if present on disk.
+/// Retrieve a cached stream if present on disk. Only serves genuine Lossless/Hi-Res tracks.
 pub fn get(video_id: &str) -> Option<Arc<Shared>> {
     let mut state = STATE.write().ok()?;
     let (filename, format, duration_ms, loudness_db, info) = {
         let entry = state.entries.get_mut(video_id)?;
+        // If not lossless or atmos, don't serve from cache: let backend query hi-res addon
+        if !entry.info.as_ref().is_some_and(|i| i.lossless() || i.atmos) {
+            log::info!("{video_id}: cached track is not lossless, skipping cache to query high quality stream");
+            return None;
+        }
         entry.last_accessed = now_secs();
         (entry.filename.clone(), entry.format.to_format(), entry.duration_ms, entry.loudness_db, entry.info.clone())
     };
@@ -149,8 +154,12 @@ pub fn get(video_id: &str) -> Option<Arc<Shared>> {
     Some(Shared::from_bytes_with_format(bytes, duration_ms, loudness_db, format, info))
 }
 
-/// Store a completed audio stream to disk.
+/// Store a completed audio stream to disk. Only saves genuine Lossless/Hi-Res tracks.
 pub fn store(video_id: &str, data: Vec<u8>, duration_ms: u64, loudness_db: Option<f32>, format: Format, info: Option<Info>) {
+    if !info.as_ref().is_some_and(|i| i.lossless() || i.atmos) {
+        log::debug!("{video_id}: skipping disk cache for non-lossless track");
+        return;
+    }
     let mut state = match STATE.write() {
         Ok(s) => s,
         Err(_) => return,

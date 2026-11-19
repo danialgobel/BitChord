@@ -1374,17 +1374,20 @@ impl Backend {
             return Ok(shared);
         }
         let (source, s) = self.resolve(video_id, false, track, true).await?;
+        let is_lossless = s.info.as_ref().is_some_and(|info| info.lossless() || info.atmos);
         // Atmos arrives already decoded: a complete buffer, no download to run.
         if let Some(data) = s.data {
             let shared = Shared::from_bytes_with_format(data.clone(), s.duration_ms, s.loudness_db, s.format.clone(), s.info.clone());
-            let id_for_cache = video_id.to_owned();
-            let format_for_cache = s.format.clone();
-            let info_for_cache = s.info.clone();
-            let duration_ms = s.duration_ms;
-            let loudness_db = s.loudness_db;
-            tokio::task::spawn_blocking(move || {
-                crate::cache::store(&id_for_cache, data, duration_ms, loudness_db, format_for_cache, info_for_cache);
-            });
+            if is_lossless {
+                let id_for_cache = video_id.to_owned();
+                let format_for_cache = s.format.clone();
+                let info_for_cache = s.info.clone();
+                let duration_ms = s.duration_ms;
+                let loudness_db = s.loudness_db;
+                tokio::task::spawn_blocking(move || {
+                    crate::cache::store(&id_for_cache, data, duration_ms, loudness_db, format_for_cache, info_for_cache);
+                });
+            }
             return Ok(shared);
         }
         let shared = Shared::new(s.size, s.duration_ms, s.loudness_db, s.format.clone(), s.info.clone(), prefetch);
@@ -1396,22 +1399,24 @@ impl Backend {
             Some(self.refresher(source, video_id, s.format.clone(), track.cloned())),
             s.ranging,
         ));
-        let shared_for_cache = shared.clone();
-        let id_for_cache = video_id.to_owned();
-        let format_for_cache = s.format.clone();
-        let info_for_cache = s.info.clone();
-        let duration_ms = s.duration_ms;
-        let loudness_db = s.loudness_db;
-        self.rt.spawn(async move {
-            shared_for_cache.finished().await;
-            if shared_for_cache.is_complete() {
-                if let Some(bytes) = shared_for_cache.bytes() {
-                    tokio::task::spawn_blocking(move || {
-                        crate::cache::store(&id_for_cache, bytes, duration_ms, loudness_db, format_for_cache, info_for_cache);
-                    }).await.ok();
+        if is_lossless {
+            let shared_for_cache = shared.clone();
+            let id_for_cache = video_id.to_owned();
+            let format_for_cache = s.format.clone();
+            let info_for_cache = s.info.clone();
+            let duration_ms = s.duration_ms;
+            let loudness_db = s.loudness_db;
+            self.rt.spawn(async move {
+                shared_for_cache.finished().await;
+                if shared_for_cache.is_complete() {
+                    if let Some(bytes) = shared_for_cache.bytes() {
+                        tokio::task::spawn_blocking(move || {
+                            crate::cache::store(&id_for_cache, bytes, duration_ms, loudness_db, format_for_cache, info_for_cache);
+                        }).await.ok();
+                    }
                 }
-            }
-        });
+            });
+        }
         Ok(shared)
     }
 
