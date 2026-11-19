@@ -52,6 +52,60 @@ impl App {
         self.discord_sent = want;
     }
 
+    /// Mirror playback status to Discord server realtime live monitor channel (1 card per user).
+    pub(super) fn sync_monitor(&mut self) {
+        let Some(m) = &self.monitor else { return };
+        let track = self.playing_track();
+        let is_playing = self.playing() && !self.buffering;
+
+        let want = track.map(|t| {
+            let quality = match &self.audio_info {
+                Some((_, info)) => format!("{} ({})", info.badge(), info.codec),
+                None => {
+                    if self.high_quality {
+                        "AAC 256k / High Quality".to_string()
+                    } else {
+                        "Opus 160k / Standard".to_string()
+                    }
+                }
+            };
+            let anim_mode = match self.lyric_prefs.anim_mode {
+                crate::ui::lyric_prefs::LyricAnimMode::Standard => "Standard Cinematic",
+                crate::ui::lyric_prefs::LyricAnimMode::KineticPop => "Kinetic Pop",
+                crate::ui::lyric_prefs::LyricAnimMode::Constellation => "Constellation",
+                crate::ui::lyric_prefs::LyricAnimMode::ConvexLens => "Convex Lens",
+                crate::ui::lyric_prefs::LyricAnimMode::PhysicsThrow => "Physics Throw",
+                crate::ui::lyric_prefs::LyricAnimMode::CodeEditor => "Code Editor",
+                crate::ui::lyric_prefs::LyricAnimMode::Chat => "Chat Bubble",
+            }
+            .to_string();
+
+            let user_name = self.account_name.clone().unwrap_or_else(|| {
+                std::env::var("USERNAME").unwrap_or_else(|_| "BitChord User".to_string())
+            });
+
+            crate::monitor::State {
+                user_name,
+                user_avatar: self.account_avatar.clone(),
+                video_id: t.id.clone(),
+                title: t.title.clone(),
+                artist: t.artist_line(),
+                album: t.album.as_ref().map(|a| a.name.clone()),
+                art: backend::art_url(t),
+                quality,
+                anim_mode,
+                is_playing,
+            }
+        });
+
+        if want == self.monitor_sent {
+            return;
+        }
+
+        m.send(want.clone());
+        self.monitor_sent = want;
+    }
+
     /// Tell Last.fm what's playing, and scrobble it once it has played half its length
     /// or 4 minutes (songs under 30 s don't count). Runs every frame, like Discord's.
     pub(super) fn sync_lastfm(&mut self) {

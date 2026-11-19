@@ -4,7 +4,7 @@
 ; Output: installer\Output\BitChord-Setup-<version>.exe
 
 #define AppName "BitChord"
-#define AppVersion "2.0.1"
+#define AppVersion "2.0.2"
 #define AppExe "bitchord.exe"
 #ifdef Arm64
   #define Arch "arm64"

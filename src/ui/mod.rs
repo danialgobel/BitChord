@@ -270,6 +270,8 @@ pub struct App {
     discord_enabled: bool,
     /// Last state sent to Discord, to send only real changes.
     discord_sent: Option<crate::discord::Presence>,
+    monitor: Option<crate::monitor::Monitor>,
+    monitor_sent: Option<crate::monitor::State>,
     /// The Last.fm account scrobbles go to; a sign-in in progress and its outcome.
     lastfm_user: Option<String>,
     lastfm_busy: Arc<AtomicBool>,
@@ -585,11 +587,20 @@ impl App {
         // Before any request: a song started at launch (dev hooks) must see this setting.
         backend.set_high_quality(get("high_quality").is_none_or(|v| v == "1"));
         // Before any request: a song started at launch must see the hi-res source too.
-        let hires_source = get("hires_source").unwrap_or_else(|| "http://127.0.0.1:8765".to_string());
-        let hires_sources: Vec<String> = if hires_source.trim().is_empty() {
-            vec!["http://127.0.0.1:8765".to_string()]
-        } else {
-            hires_source.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect()
+        let default_hires = ["http://127.0.0.1:8765", "https://rezenonance.onrender.com/manifest.json"];
+        let hires_sources: Vec<String> = match get("hires_source") {
+            None => default_hires.iter().map(|&s| s.to_string()).collect(),
+            Some(ref s) if s.trim().is_empty() => default_hires.iter().map(|&s| s.to_string()).collect(),
+            Some(s) => {
+                let mut list: Vec<String> = s.lines().map(str::trim).filter(|l| !l.is_empty()).map(str::to_owned).collect();
+                if !list.iter().any(|u| u.contains("127.0.0.1:8765")) {
+                    list.insert(0, "http://127.0.0.1:8765".to_string());
+                }
+                if !list.iter().any(|u| u.contains("rezenonance.onrender.com")) {
+                    list.push("https://rezenonance.onrender.com/manifest.json".to_string());
+                }
+                list
+            }
         };
         backend.set_hires_source(&hires_sources.join("\n"));
         let prefer_atmos = get("prefer_atmos").is_some_and(|v| v == "1");
@@ -606,6 +617,7 @@ impl App {
             let b = backend.clone();
             crate::transfer::Transfer::new(backend.data_dir(), Arc::new(move || b.wake()))
         };
+        let monitor = crate::monitor::Monitor::spawn(backend.data_dir());
         let mut app = Self {
             backend,
             audio,
@@ -614,6 +626,8 @@ impl App {
             discord: discord_enabled.then(crate::discord::Discord::spawn).flatten(),
             discord_enabled,
             discord_sent: None,
+            monitor: Some(monitor),
+            monitor_sent: None,
             lastfm_user: crate::lastfm::user(),
             lastfm_busy: Default::default(),
             lastfm_result: Default::default(),
@@ -1186,6 +1200,7 @@ impl eframe::App for App {
         self.tray_window(ctx);
         self.window_hidden = self.tray.is_some() || ctx.input(|i| i.viewport().minimized == Some(true));
         self.sync_discord();
+        self.sync_monitor();
         self.sync_lastfm();
         self.sync_server_queue(ctx, now);
         self.tick_updates(ctx, now);

@@ -24,6 +24,7 @@ mod login;
 mod lyrics;
 mod media;
 mod model;
+mod monitor;
 mod motion;
 mod opus;
 mod preset;
