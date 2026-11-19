@@ -3,6 +3,7 @@
 mod appicon;
 mod apple;
 mod artist_signature;
+mod cache;
 mod fullscreen;
 mod proxy;
 mod renderer;

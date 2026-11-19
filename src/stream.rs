@@ -16,20 +16,20 @@ use std::time::Duration;
 
 use bytes::Bytes;
 
-const BLOCK: u64 = 512 * 1024;
-const WORKERS: usize = 6;
+const BLOCK: u64 = 256 * 1024;
+const WORKERS: usize = 3;
 /// Tries per block before the download gives up, waiting a little longer each time
-/// (about half a minute in all): long enough to ride out a dropped connection.
-const RETRIES: u32 = 6;
+/// (about 5-6 seconds in all): long enough to ride out a quick hiccup without freezing playback.
+const RETRIES: u32 = 3;
 /// A response that delivers nothing for this long is dead; a slow one that keeps
 /// delivering is fine, however long the block takes.
-const STALL: Duration = Duration::from_secs(20);
+const STALL: Duration = Duration::from_secs(15);
 /// googlevideo occasionally starts rejecting a URL partway through (HTTP 403);
 /// a freshly resolved URL for the same video resumes the download.
 const MAX_REFRESHES: u32 = 2;
-/// A prefetch / initial start fetches this much (~2 MB, giving 4-10s of high-res FLAC runway)
+/// A prefetch / initial start fetches this much (~768 KB, giving 3-6s of FLAC runway)
 /// before playback starts: enough to start instantly and smoothly without buffer starvation.
-const HEAD_BLOCKS: usize = 4;
+const HEAD_BLOCKS: usize = 3;
 /// Files larger than this (long mixes, whole concert videos > 300 MB) aren't kept whole.
 /// Standard songs (including 24-bit 192kHz studio FLAC at 50-120 MB) stay in memory whole,
 /// preventing chunk eviction so scrubbing and seeking are instantaneous without re-downloading.

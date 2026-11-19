@@ -445,7 +445,7 @@ const PLAY_SONG_WAIT: std::time::Duration = std::time::Duration::from_millis(250
 const PREFETCH_SONG_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
 /// How long playback waits for the hi-res sources before falling back to YouTube. A cold
 /// addon mints a lossless URL in a few seconds, and every source is asked at once.
-const HIRES_WAIT: std::time::Duration = std::time::Duration::from_millis(5000);
+const HIRES_WAIT: std::time::Duration = std::time::Duration::from_millis(2500);
 
 #[derive(Clone)]
 pub struct Backend {
@@ -1369,20 +1369,49 @@ impl Backend {
         if let Some(shared) = tokio::task::spawn_blocking(move || crate::downloads::open(&id)).await? {
             return Ok(shared);
         }
+        let id_cache = video_id.to_owned();
+        if let Some(shared) = tokio::task::spawn_blocking(move || crate::cache::get(&id_cache)).await? {
+            return Ok(shared);
+        }
         let (source, s) = self.resolve(video_id, false, track, true).await?;
         // Atmos arrives already decoded: a complete buffer, no download to run.
         if let Some(data) = s.data {
-            return Ok(Shared::from_bytes_with_format(data, s.duration_ms, s.loudness_db, s.format, s.info));
+            let shared = Shared::from_bytes_with_format(data.clone(), s.duration_ms, s.loudness_db, s.format.clone(), s.info.clone());
+            let id_for_cache = video_id.to_owned();
+            let format_for_cache = s.format.clone();
+            let info_for_cache = s.info.clone();
+            let duration_ms = s.duration_ms;
+            let loudness_db = s.loudness_db;
+            tokio::task::spawn_blocking(move || {
+                crate::cache::store(&id_for_cache, data, duration_ms, loudness_db, format_for_cache, info_for_cache);
+            });
+            return Ok(shared);
         }
-        let shared = Shared::new(s.size, s.duration_ms, s.loudness_db, s.format.clone(), s.info, prefetch);
+        let shared = Shared::new(s.size, s.duration_ms, s.loudness_db, s.format.clone(), s.info.clone(), prefetch);
         self.rt.spawn(stream::download(
             self.http(),
             s.url,
             s.user_agent,
             shared.clone(),
-            Some(self.refresher(source, video_id, s.format, track.cloned())),
+            Some(self.refresher(source, video_id, s.format.clone(), track.cloned())),
             s.ranging,
         ));
+        let shared_for_cache = shared.clone();
+        let id_for_cache = video_id.to_owned();
+        let format_for_cache = s.format.clone();
+        let info_for_cache = s.info.clone();
+        let duration_ms = s.duration_ms;
+        let loudness_db = s.loudness_db;
+        self.rt.spawn(async move {
+            shared_for_cache.finished().await;
+            if shared_for_cache.is_complete() {
+                if let Some(bytes) = shared_for_cache.bytes() {
+                    tokio::task::spawn_blocking(move || {
+                        crate::cache::store(&id_for_cache, bytes, duration_ms, loudness_db, format_for_cache, info_for_cache);
+                    }).await.ok();
+                }
+            }
+        });
         Ok(shared)
     }
 

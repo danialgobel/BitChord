@@ -987,11 +987,11 @@ fn menu_divider(ui: &mut Ui) {
 // ------------------------------------------------------------------ audio quality
 
 fn badge_font(small: bool) -> egui::FontId {
-    theme::semibold(if small { 9.0 } else { 11.0 })
+    theme::semibold(if small { 11.0 } else { 13.0 })
 }
 
 fn glyph_side(small: bool) -> f32 {
-    if small { 11.0 } else { 13.0 }
+    if small { 13.0 } else { 15.5 }
 }
 
 /// Whether the mark leads with an icon: Apple's lossless wave, or Dolby's double-D.

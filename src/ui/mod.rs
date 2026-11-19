@@ -582,6 +582,7 @@ impl App {
         // and keep the Start menu link pointing at this exe.
         crate::appicon::sync_shortcuts(app_icon, backend.data_dir());
         crate::downloads::init(backend.data_dir(), &get("download_dir").unwrap_or_default());
+        crate::cache::init(backend.data_dir());
         crate::lastfm::init(backend.data_dir());
         let logged_in = backend.is_logged_in();
         // Before any request: a song started at launch (dev hooks) must see this setting.

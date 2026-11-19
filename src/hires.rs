@@ -22,7 +22,7 @@ const SEARCH_LIMIT: usize = 25;
 const STREAM_TRIES: usize = 3;
 
 /// What the player says about the stream it is playing.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Info {
     /// The addon's own name (or its host when it publishes none).
     pub source: String,
